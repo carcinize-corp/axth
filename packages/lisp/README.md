@@ -60,7 +60,8 @@ The transport callback has this contract:
 ```
 
 Pass it as `:transport` to `ax:ai` for tests or another HTTP library.
-The default transport uses Drakma. Provider errors do not include response bodies or credentials.
+The default transport uses Drakma, verifies HTTPS certificates, and does not follow redirects.
+Provider errors do not include response bodies or credentials.
 Tool handlers run application code. Grant each handler only the permissions it needs.
 Handler errors propagate to the caller and are not retried automatically.
 
@@ -104,7 +105,7 @@ This package does not emulate that interface. Use the proposer interface shown a
 
 ## Test and maintain
 
-Run from the repository root:
+Install the `openssl` command for the local TLS regression test, then run from the repository root:
 
 ```sh
 sbcl --script packages/lisp/tests/run.lisp

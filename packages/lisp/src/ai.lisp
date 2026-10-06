@@ -300,6 +300,9 @@ every non-ASCII character is corrupted."
                                    :external-format-out :utf-8
                                    :external-format-in :utf-8
                                    :connection-timeout timeout
+                                   ;; Drakma otherwise disables certificate
+                                   ;; verification even for HTTPS endpoints.
+                                   :verify :required
                                    ;; Never follow redirects: Drakma would
                                    ;; replay the Authorization/x-api-key
                                    ;; header to the redirect target.

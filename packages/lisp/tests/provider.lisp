@@ -1030,9 +1030,9 @@ octets, which is what an HTTP client reads."
 
 (defstruct (loopback (:conc-name loopback-)) port socket thread (requests '()) lock)
 
-(defun start-loopback-server (responder)
+(defun start-loopback-server (responder &key certificate key)
   "Start a one-thread loopback HTTP server.  RESPONDER receives the parsed
-request object and a character stream."
+request object and a binary stream. Optional CERTIFICATE and KEY enable TLS."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
     (sb-bsd-sockets:socket-bind socket #(127 0 0 1) 0)
@@ -1051,10 +1051,16 @@ request object and a character stream."
                                   (let* ((stream (sb-bsd-sockets:socket-make-stream
                                                   client :input t :output t
                                                          :element-type '(unsigned-byte 8)))
+                                         (stream (if certificate
+                                                     (cl+ssl:make-ssl-server-stream
+                                                      stream :certificate (namestring certificate)
+                                                      :key (namestring key))
+                                                     stream))
                                          (request (%read-http-request stream)))
                                     (sb-thread:with-mutex ((loopback-lock server))
                                       (push request (loopback-requests server)))
-                                    (funcall responder request stream))
+                                    (unwind-protect (funcall responder request stream)
+                                      (close stream)))
                                 (error () nil))
                            (ignore-errors (sb-bsd-sockets:socket-close client)))))
                    (error () nil)))
@@ -1095,6 +1101,31 @@ request object and a character stream."
              (expect-equal (jget body "model") +test-openai-model+
                            "explicit model reached the server")))
       (stop-loopback-server server))))
+
+(deftest test-default-transport-rejects-untrusted-tls-before-sending-credentials
+  (uiop:with-temporary-file (:pathname certificate :type "pem")
+    (uiop:with-temporary-file (:pathname key :type "pem")
+      (uiop:run-program (list "openssl" "req" "-x509" "-newkey" "rsa:2048"
+                              "-nodes" "-keyout" (namestring key)
+                              "-out" (namestring certificate) "-days" "1"
+                              "-subj" "/CN=localhost" "-addext" "subjectAltName=IP:127.0.0.1")
+                        :output nil :error-output nil)
+      (let ((server (start-loopback-server
+                     (lambda (request stream)
+                       (declare (ignore request))
+                       (%write-http-response stream 200 (openai-text-response "insecure")))
+                     :certificate certificate :key key)))
+        (unwind-protect
+             (let ((client (ai :name "openai" :model +test-openai-model+
+                               :api-key "tls-test-key" :timeout 3
+                               :base-url (format nil "https://127.0.0.1:~d/v1" (loopback-port server)))))
+               (let ((condition (expect-error provider-error provider-error-kind :transport
+                                  (chat client (vector (message "user" "hi"))))))
+                 (expect-not-contains (princ-to-string condition) "tls-test-key"
+                                     "TLS condition never exposes the key"))
+               (expect-equal (loopback-request-count server) 0
+                             "TLS validation fails before any HTTP headers reach the server"))
+          (stop-loopback-server server))))))
 
 (deftest test-default-transport-timeout-is-bounded
   (let ((server (start-loopback-server
