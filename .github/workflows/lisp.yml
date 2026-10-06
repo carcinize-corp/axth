@@ -3,6 +3,7 @@ name: Common Lisp
 on:
   pull_request:
     paths:
+      - '.agents/setup'
       - 'packages/lisp/**'
       - 'tools/axir/**'
       - 'ir/**'
@@ -12,6 +13,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.agents/setup'
       - 'packages/lisp/**'
       - 'tools/axir/**'
       - 'ir/**'
@@ -28,12 +30,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.26.1'
-          cache: false
-      - name: Install Common Lisp dependencies
-        run: sudo apt-get update && sudo apt-get install -y sbcl cl-yason cl-alexandria cl-ppcre cl-drakma openssl
+      - name: Prepare Lisp orb environment
+        run: |
+          .agents/setup
+          echo '/usr/local/bin' >> "$GITHUB_PATH"
       - name: Test Core emitter and generated source freshness
         working-directory: tools/axir
         run: |

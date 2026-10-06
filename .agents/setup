@@ -18,11 +18,11 @@ if ((${#missing[@]})); then
 fi
 echo "Lisp dependencies ready ($((SECONDS - started))s)."
 
-# Keep this version aligned with .github/workflows/lisp.yml. A /usr/local/bin
-# link makes the selected compiler available to later shells, not just setup.
+# CI uses this same setup. A /usr/local/bin link makes the selected compiler
+# available to later shells, not just setup.
 go_version=1.26.1
 go_root="/opt/ax-go-$go_version"
-if [[ ! -x "$go_root/bin/go" ]] || [[ $("$go_root/bin/go" version) != "go version go$go_version "* ]]; then
+if [[ ! -f "$go_root/.amp-complete" || ! -x "$go_root/bin/go" ]] || [[ $("$go_root/bin/go" version) != "go version go$go_version "* ]]; then
   # SHA-256 values from https://go.dev/dl/?mode=json&include=all.
   case $(uname -m) in
     x86_64)
@@ -35,12 +35,23 @@ if [[ ! -x "$go_root/bin/go" ]] || [[ $("$go_root/bin/go" version) != "go versio
   esac
   archive="go$go_version.linux-$arch.tar.gz"
   scratch=$(mktemp -d)
-  trap 'rm -rf "$scratch"' EXIT
+  stage=""
+  trap 'rm -rf "$scratch"; if [[ -n "$stage" ]]; then sudo rm -rf "$stage"; fi' EXIT
   echo "Installing Go $go_version."
-  curl --fail --silent --show-error --location --retry 3 "https://go.dev/dl/$archive" -o "$scratch/$archive"
-  printf '%s  %s\n' "$checksum" "$scratch/$archive" | sha256sum --check --status
-  sudo mkdir -p "$go_root"
-  sudo tar -xzf "$scratch/$archive" --strip-components=1 -C "$go_root"
+  curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 120 \
+    "https://go.dev/dl/$archive" -o "$scratch/$archive"
+  printf '%s  %s\n' "$checksum" "$scratch/$archive" | sha256sum --check --status || {
+    echo "Checksum mismatch for $archive" >&2
+    exit 1
+  }
+  stage=$(sudo mktemp -d "$go_root.partial.XXXXXX")
+  sudo tar -xzf "$scratch/$archive" --strip-components=1 -C "$stage"
+  sudo chmod 755 "$stage"
+  sudo touch "$stage/.amp-complete"
+  # Never publish a half-extracted compiler, including on a later warm run.
+  sudo rm -rf "$go_root"
+  sudo mv "$stage" "$go_root"
+  stage=""
 fi
 sudo ln -sfn "$go_root/bin/go" /usr/local/bin/go
 sudo ln -sfn "$go_root/bin/gofmt" /usr/local/bin/gofmt
@@ -48,9 +59,10 @@ sudo ln -sfn "$go_root/bin/gofmt" /usr/local/bin/gofmt
 # Compile ASDF dependencies and the package into the snapshot's Lisp cache.
 # Do not run the test suite or start services during setup.
 repo_root=$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")
-sbcl --noinform --non-interactive --eval '(require :asdf)' \
-  --eval "(asdf:load-asd #P\"$repo_root/packages/lisp/axllm.asd\")" \
-  --eval '(asdf:load-system "axllm")'
+AX_ORB_REPO_ROOT="$repo_root" sbcl --noinform --non-interactive --eval '(require :asdf)' \
+  --eval '(dolist (s (list "yason" "cl-ppcre" "drakma" "sb-bsd-sockets" "sb-posix")) (asdf:load-system s))' \
+  --eval '(asdf:load-asd (merge-pathnames "packages/lisp/axllm.asd" (uiop:ensure-directory-pathname (uiop:getenv "AX_ORB_REPO_ROOT"))))' \
+  --eval '(let ((uiop:*compile-file-warnings-behaviour* :error)) (asdf:load-system "axllm/tests"))'
 "$go_root/bin/go" version
 sbcl --version
 echo "Lisp orb setup complete ($((SECONDS - started))s)."
