@@ -10,6 +10,11 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const siteRoot = path.join(repoRoot, 'website');
 const destination = await mkdtemp(path.join(tmpdir(), 'website-public-'));
+// The site is deployed under a repository subpath on GitHub Pages, so the check
+// builds against a subpath base URL and resolves the canonified links back to
+// the published tree.
+const checkBaseURL = 'https://links.test/axth/';
+const checkBasePrefix = checkBaseURL.replace(/\/$/, '');
 
 try {
   run('npm', ['run', 'doc:build:markdown']);
@@ -17,6 +22,8 @@ try {
   run('hugo', [
     '--source',
     siteRoot,
+    '--baseURL',
+    checkBaseURL,
     '--environment',
     'production',
     '--destination',
@@ -54,6 +61,28 @@ try {
     path.join(destination, 'js', 'academy-engine.js'),
     'utf8'
   );
+  const mermaidInit = await readFile(
+    path.join(destination, 'js', 'mermaid-init.js'),
+    'utf8'
+  );
+  // Hugo rewrites root-leading links in markup against baseURL, but static
+  // scripts are published verbatim, so a hardcoded "/asset" bypasses the
+  // deployed subpath.
+  for (const [name, source] of [
+    ['js/site.js', js],
+    ['js/academy.js', academyJs],
+    ['js/academy-engine.js', academyEngine],
+    ['js/mermaid-init.js', mermaidInit],
+  ]) {
+    const hardcoded = source.match(
+      /['"`]\/(?:js|css|svg|pagefind|vendor|typescript|python|java|cpp|go|rust|research)\//g
+    );
+    if (hardcoded) {
+      qualityFailures.push(
+        `${name}: site paths must resolve against data-base-path, found ${[...new Set(hardcoded)].join(', ')}`
+      );
+    }
+  }
   if (
     !css.includes('flex-direction:column') &&
     !css.includes('flex-direction: column')
@@ -447,7 +476,10 @@ function localRefs(html) {
   const refs = [];
   const regex = /\s(?:href|src)="([^"]+)"/g;
   for (const match of html.matchAll(regex)) {
-    const ref = match[1];
+    let ref = match[1];
+    if (ref === checkBasePrefix || ref.startsWith(`${checkBasePrefix}/`)) {
+      ref = ref.slice(checkBasePrefix.length) || '/';
+    }
     if (
       ref.startsWith('http://') ||
       ref.startsWith('https://') ||

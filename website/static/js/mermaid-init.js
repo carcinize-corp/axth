@@ -1,4 +1,12 @@
-const mermaidModule = await import('/vendor/mermaid/mermaid.esm.min.mjs');
+// Resolve the vendored bundle against the deployed site base path, which Hugo
+// renders on <html data-base-path> (for example "/axth/").
+const basePath = (document.documentElement.dataset.basePath || '/').replace(
+  /\/*$/,
+  '/'
+);
+const mermaidModule = await import(
+  `${basePath}vendor/mermaid/mermaid.esm.min.mjs`
+);
 const mermaid = mermaidModule.default;
 
 const isDark = () =>

@@ -1,10 +1,12 @@
-baseURL = "https://axllm.dev/"
+baseURL = "https://carcinize-corp.github.io/axth/"
 locale = "en-us"
 title = "Ax"
 disableKinds = ["taxonomy", "term"]
 enableGitInfo = false
 relativeURLs = false
-canonifyURLs = false
+# Root-leading links in content and shortcodes are rewritten against baseURL so
+# the site works from a repository subpath such as /axth/.
+canonifyURLs = true
 
 [markup]
   [markup.goldmark]

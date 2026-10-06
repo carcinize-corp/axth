@@ -832,7 +832,14 @@ function currentDaySalt() {
 }
 
 function academyRoot(course) {
-  return `/${course.language}/academy`;
+  // Hugo renders the deployed base path on <html data-base-path>; the engine is
+  // also imported by Node tests, where it falls back to a root-hosted site.
+  const basePath = (
+    typeof document === 'undefined'
+      ? '/'
+      : document.documentElement.dataset.basePath || '/'
+  ).replace(/\/*$/, '/');
+  return `${basePath}${course.language}/academy`;
 }
 
 function normalizeGoal(value, fallback) {

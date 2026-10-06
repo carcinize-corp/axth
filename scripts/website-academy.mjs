@@ -373,8 +373,15 @@ function exercisePublicSymbols(exercise, publicExports) {
   return [...candidates].filter((symbol) => publicExports.has(symbol));
 }
 
-export function buildAcademyPages(course, language) {
-  const localizedCourse = localizeAcademyCourse(course, language);
+export function buildAcademyPages(course, language, options = {}) {
+  // `skillPageSlugs` lists the skill pages this language actually publishes, so
+  // source links can fall back instead of pointing at a page that is absent.
+  const localizedCourse = {
+    ...localizeAcademyCourse(course, language),
+    skillPageSlugs: options.skillPageSlugs
+      ? new Set(options.skillPageSlugs)
+      : null,
+  };
   const manifest = academyManifest(localizedCourse);
   const pages = [
     descriptor(`${language.id}/academy/_index.md`, language, {
@@ -782,7 +789,7 @@ function renderTopic(course, manifest, unit, topic) {
         </section>
         <section class="academy-sources" aria-labelledby="sources-title">
           <span class="academy-label">Keep exploring</span><h2 id="sources-title">Source-backed follow-up</h2>
-          <ul>${unit.sourceRefs.map((source) => renderSourceLink(source, course.language)).join('')}${unit.examplePaths.length ? `<li><a href="${githubSource(unit.examplePaths[0])}">Source on GitHub</a></li>` : ''}</ul>
+          <ul>${unit.sourceRefs.map((source) => renderSourceLink(source, course)).join('')}${unit.examplePaths.length ? `<li><a href="${githubSource(unit.examplePaths[0])}">Source on GitHub</a></li>` : ''}</ul>
         </section>
         <nav class="academy-lesson-nav" aria-label="Course lessons">
           ${previous ? `<a href="${topicHref(previous, course.language)}">← Previous</a>` : '<span></span>'}
@@ -905,17 +912,30 @@ function githubSource(source) {
   return `https://github.com/ax-llm/ax/blob/main/${source}`;
 }
 
-function renderSourceLink(source, languageId) {
+function renderSourceLink(source, course) {
+  const languageId = course.language;
   const basename = path.basename(source, path.extname(source));
   const skill = basename.startsWith('ax-') ? basename : null;
   const label = sourceLabels[basename] ?? humanizeSource(basename);
   const publicPath = sourcePublicPaths[source];
-  const href = publicPath
-    ? `/${languageId}/${publicPath}/`
-    : skill
-      ? `/${languageId}/skills/${skill}/`
-      : githubSource(source);
-  return `<li><a href="${href}">${escapeHtml(label)}</a></li>`;
+  // Only TypeScript skill pages keep the bare `ax-*` slug; every other language
+  // publishes `ax-<language>-*`.
+  const skillSlug =
+    skill && languageId !== 'typescript'
+      ? skill.replace(/^ax-/, `ax-${languageId}-`)
+      : skill;
+  // Not every language ships every skill. Without a published page, link the
+  // source file the lesson is built from instead of a page that does not exist.
+  const skillPagePublished =
+    skillSlug &&
+    (course.skillPageSlugs ? course.skillPageSlugs.has(skillSlug) : true);
+  if (publicPath) {
+    return `<li><a href="/${languageId}/${publicPath}/">${escapeHtml(label)}</a></li>`;
+  }
+  if (skillPagePublished) {
+    return `<li><a href="/${languageId}/skills/${skillSlug}/">${escapeHtml(label)}</a></li>`;
+  }
+  return `<li><a href="${githubSource(source)}">${escapeHtml(label)} (source on GitHub)</a></li>`;
 }
 
 const sourceLabels = {

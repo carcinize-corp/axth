@@ -1,3 +1,14 @@
+// Hugo publishes the site base path (for example "/axth/" on a project Pages
+// site) on <html data-base-path>, so runtime URLs follow the deployed base.
+const basePath = (document.documentElement.dataset.basePath || '/').replace(
+  /\/*$/,
+  '/'
+);
+
+function siteURL(route) {
+  return `${basePath}${String(route).replace(/^\/+/, '')}`;
+}
+
 const themeStorageKey = 'ax-md-theme';
 const themeModes = ['auto', 'light', 'dark'];
 const themeLabels = {
@@ -325,7 +336,10 @@ function applyHomeLanguage(language, heroExample = homeActiveHeroExample) {
   }
 
   for (const link of document.querySelectorAll('[data-home-lang-href]')) {
-    link.setAttribute('href', `/${language}/${link.dataset.homeLangHref}`);
+    link.setAttribute(
+      'href',
+      siteURL(`${language}/${link.dataset.homeLangHref}`)
+    );
   }
 
   reserveHomeHeroPanelHeight();
@@ -852,7 +866,7 @@ function setSearchStatus(text) {
 
 async function loadPagefind() {
   if (pagefindModule) return pagefindModule;
-  pagefindModule = await import('/pagefind/pagefind.js');
+  pagefindModule = await import(siteURL('pagefind/pagefind.js'));
   await pagefindModule.options?.({
     excerptLength: 34,
     highlightParam: 'highlight',
@@ -1666,7 +1680,7 @@ function ensureAppendedMermaid(root) {
   const loader = document.createElement('script');
   loader.type = 'module';
   loader.dataset.mermaidInit = 'true';
-  loader.src = `/js/mermaid-init.js${assetVersion}`;
+  loader.src = siteURL(`js/mermaid-init.js${assetVersion}`);
   document.head.append(loader);
 }
 

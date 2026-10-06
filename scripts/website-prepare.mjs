@@ -282,7 +282,12 @@ await validateAcademyCourse(academyCourse, {
 });
 await validateAcademyLanguages(academyCourse, languages, { repoRoot });
 for (const language of languages) {
-  for (const academyPage of buildAcademyPages(academyCourse, language)) {
+  const skillPageSlugs = (inventory.languageSkills[language.id] ?? []).map(
+    (skill) => skillPageSlug(skill)
+  );
+  for (const academyPage of buildAcademyPages(academyCourse, language, {
+    skillPageSlugs,
+  })) {
     await writePage(academyPage.relPath, academyPage.page);
   }
 }

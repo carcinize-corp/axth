@@ -8,7 +8,7 @@
     (dict "id" "rust" "label" "Rust" "package" "axllm" "status" "on crates.io" "href" "/rust/quick-start/")
   }}
   {{ range $languages }}
-    <a href="{{ .href }}">
+    <a href="{{ .href | relURL }}">
       {{ partial "language-mark.html" . }}
       <span>
         <strong>{{ .label }}</strong>

@@ -45,10 +45,16 @@ jobs:
           hugo version
       - name: Install dependencies
         run: npm ci
-      - name: Build site (TypeDoc API → Hugo → Pagefind index)
-        run: npm run website:build
       - name: Setup Pages
+        id: pages
         uses: actions/configure-pages@v6
+      - name: Build site (TypeDoc API → Hugo → Pagefind index)
+        # The Pages base URL (for example https://carcinize-corp.github.io/axth/)
+        # must be known before Hugo runs so every link and asset resolves under
+        # the repository subpath.
+        env:
+          HUGO_BASEURL: ${{ steps.pages.outputs.base_url }}
+        run: npm run website:build
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:

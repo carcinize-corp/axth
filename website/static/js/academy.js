@@ -933,7 +933,11 @@ function showCompletion(course, host, title, copy) {
 }
 
 function academyRoot(course) {
-  return `/${course.language}/academy`;
+  const basePath = (document.documentElement.dataset.basePath || '/').replace(
+    /\/*$/,
+    '/'
+  );
+  return `${basePath}${course.language}/academy`;
 }
 
 function button(label, primary = false) {

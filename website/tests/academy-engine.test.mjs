@@ -118,9 +118,7 @@ test('every supported language generates a native, complete Academy', async () =
     const firstLesson = pages.find((page) =>
       page.relPath.includes('/topics/programs-not-prompts/')
     );
-    assert.ok(
-      firstLesson.page.body.includes(`\"language\":\"${language.id}\"`)
-    );
+    assert.ok(firstLesson.page.body.includes(`"language":"${language.id}"`));
     if (language.id !== 'typescript') {
       assert.ok(!firstLesson.page.body.includes('const classify ='));
     }
@@ -158,6 +156,38 @@ test('every supported language generates a native, complete Academy', async () =
     assert.ok(manifestBytes > 100_000);
     assert.ok(manifestBytes < 180_000);
   }
+});
+
+test('lesson source links use published skill pages and fall back to the source file', async () => {
+  const languages = await readLanguages();
+  const cpp = languages.find((language) => language.id === 'cpp');
+  // C++ publishes a signature skill page but no MCP skill page.
+  const pages = buildAcademyPages(academyCourse, cpp, {
+    skillPageSlugs: ['ax-cpp-signature'],
+  });
+  const lessonBody = (topicId) =>
+    pages.find((page) => page.relPath.includes(`/topics/${topicId}/`)).page
+      .body;
+
+  const published = lessonBody('programs-not-prompts');
+  assert.ok(published.includes('href="/cpp/skills/ax-cpp-signature/"'));
+  assert.ok(!published.includes('href="/cpp/skills/ax-signature/"'));
+
+  const missing = lessonBody('mcp-attach');
+  assert.ok(!missing.includes('/cpp/skills/ax-cpp-mcp/'));
+  assert.ok(!missing.includes('/cpp/skills/ax-mcp/'));
+  assert.ok(
+    missing.includes(
+      '<a href="https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-mcp.md">MCP clients and native capabilities (source on GitHub)</a>'
+    )
+  );
+
+  // Without a published-page list the builder keeps linking skill pages, which
+  // is what the Academy engine tests and ad-hoc builds rely on.
+  const unscoped = buildAcademyPages(academyCourse, cpp).find((page) =>
+    page.relPath.includes('/topics/mcp-attach/')
+  ).page.body;
+  assert.ok(unscoped.includes('href="/cpp/skills/ax-cpp-mcp/"'));
 });
 
 test('lesson presentation aligns breadcrumbs and hides unused feedback', async () => {
