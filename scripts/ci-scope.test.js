@@ -185,7 +185,7 @@ describe('AxIR CI scope', () => {
     ).toEqual(['src/ax/mcp/client.ts']);
   });
 
-  it('classifies every generated package and example root as AxIR matrix input', () => {
+  it('covers every package with the AxIR matrix or its dedicated workflow', () => {
     const languages = readdirSync(path.join(repoRoot, 'packages'), {
       withFileTypes: true,
     })
@@ -196,6 +196,26 @@ describe('AxIR CI scope', () => {
       expect.arrayContaining(['cpp', 'go', 'java', 'python', 'rust'])
     );
     for (const language of languages) {
+      if (language === 'lisp') {
+        // Lisp emits a Core subset, not a full axir verify target. Its own
+        // workflow must cover source changes, shared fixtures and freshness.
+        const workflow = readFileSync(
+          path.join(repoRoot, '.github/workflows/lisp.yml'),
+          'utf8'
+        );
+        for (const input of ['packages/lisp/**', 'tools/axir/**', 'ir/**']) {
+          expect(workflow.split(`- '${input}'`)).toHaveLength(3);
+        }
+        expect(workflow).toContain('go run ./cmd/lisp-core --check');
+        expect(workflow).toContain(
+          'sbcl --script packages/lisp/tests/run.lisp'
+        );
+        expect(workflow).toContain(
+          'sbcl --script packages/lisp/tests/jiti-integration.lisp'
+        );
+        expect(axirTargets(['packages/lisp/src/ai.lisp'])).toEqual([]);
+        continue;
+      }
       expect(isAxirMatrixPath(`packages/${language}/sentinel`)).toBe(true);
       expect(isAxirMatrixPath(`src/examples/${language}/sentinel`)).toBe(true);
     }

@@ -32,6 +32,11 @@ npm run example -- rust src/examples/rust/generation/basic_generation.rs
 Internal generated package fixtures remain under `packages/<language>/examples`
 for AxIR verification, but they are not part of the public examples catalog.
 
+The experimental Common Lisp package has separate
+[generation and Jiti examples](../../packages/lisp/README.md), run with SBCL.
+It is not listed in the full-language catalog because it does not implement
+flows, optimization, or audio.
+
 ## Typesafe / Jev (TypeScript)
 
 | Example | Purpose |

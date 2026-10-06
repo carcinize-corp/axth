@@ -4,6 +4,12 @@ Ax is a TypeScript-first framework for building typed AI programs, agents,
 flows, and optimizers. The same runtime semantics are also compiled through
 AxIR into language-agnostic Python, Java, C++, Go, and Rust libraries.
 
+The experimental [Common Lisp package](../packages/lisp/README.md) compiles the
+signature and schema subset of Core into Lisp. Its synchronous provider and
+generation layer runs natively in SBCL. Its Jiti adapter returns action plists
+to Jiti, which retains execution, rollback, restarts, and session ownership.
+This adapter does not implement the AxAgent runtime or Jiti's Responses chat API.
+
 For compiler and IR details, see [`docs/COMPILER.md`](./COMPILER.md). For
 audio and realtime usage, see [`docs/AUDIO.md`](./AUDIO.md). For reward-scored
 candidate selection and feedback rounds, see [`docs/REFINE.md`](./REFINE.md).

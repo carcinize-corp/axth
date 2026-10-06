@@ -9,6 +9,12 @@ TypeScript runtime and write small conformance fixtures under `ir/conformance/`.
 The compiler source of truth is the `.axir` bundle under `ir/axcore/`, plus the
 fixtures and specs under `ir/spec/`.
 
+The experimental [Common Lisp package](../packages/lisp/README.md) uses a
+separate `tools/axir/cmd/lisp-core` emitter for signatures and JSON Schema.
+It follows the Core dependency closure and tests the shared fixtures directly.
+It is not in the default full-backend verification matrix. Its native provider,
+generation, tool, and Jiti code has a separate Common Lisp CI workflow.
+
 ## Astra Session Implementation Status
 
 Astra and automatic sessions are partially implemented in the five generated

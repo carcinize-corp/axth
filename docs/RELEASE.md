@@ -17,6 +17,12 @@ it is not a package name. The generated package sources are checked in under
 - Go: module `github.com/ax-llm/ax/packages/go`, package `axllm`
 - Rust: crate `axllm`
 
+The experimental Common Lisp source package lives in `packages/lisp` and loads
+as the `axllm` ASDF system. It has no registry publication or release job.
+Its version and supported subset are independent of the full generated backends.
+See [its maintenance commands](../packages/lisp/README.md#test-and-maintain)
+before importing upstream changes.
+
 Do not publish generated packages as `axir`, `ax-go`, or other compiler/backend
 names. User-facing libraries should read as Ax libraries in each ecosystem.
 

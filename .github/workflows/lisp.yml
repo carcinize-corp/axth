@@ -1,0 +1,54 @@
+name: Common Lisp
+
+on:
+  pull_request:
+    paths:
+      - 'packages/lisp/**'
+      - 'tools/axir/**'
+      - 'ir/**'
+      - 'src/ax/ai/**'
+      - 'src/ax/dsp/**'
+      - '.github/workflows/lisp.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/lisp/**'
+      - 'tools/axir/**'
+      - 'ir/**'
+      - 'src/ax/ai/**'
+      - 'src/ax/dsp/**'
+      - '.github/workflows/lisp.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sbcl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache: false
+      - name: Install Common Lisp dependencies
+        run: sudo apt-get update && sudo apt-get install -y sbcl cl-yason cl-alexandria cl-ppcre cl-drakma
+      - name: Test Core emitter and generated source freshness
+        working-directory: tools/axir
+        run: |
+          go test ./internal/axir -run Lisp
+          go run ./cmd/lisp-core --check --out ../../packages/lisp/src/core.lisp
+      - name: Test native library and shared conformance fixtures
+        run: sbcl --script packages/lisp/tests/run.lisp
+      - name: Fetch pinned Jiti source
+        uses: actions/checkout@v7
+        with:
+          repository: ghuntley/jiti
+          ref: a9f46a604c07d8d1e1687a2797cb6e8edfecf818
+          path: .jiti-test
+          persist-credentials: false
+      - name: Exercise real Jiti worker and repair lifecycle
+        env:
+          JITI_ROOT: ${{ github.workspace }}/.jiti-test
+        run: sbcl --script packages/lisp/tests/jiti-integration.lisp
