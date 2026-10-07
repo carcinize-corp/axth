@@ -637,7 +637,22 @@ func pythonLiteral(value interface{}) string {
 }
 
 func pyName(value string) string {
-	return strings.TrimPrefix(value, "%")
+	name := strings.TrimPrefix(value, "%")
+	// Escape the prefix too, so a legal Core name cannot collide with an
+	// escaped keyword (for example %class and %_ax_keyword_class).
+	const prefix = "_ax_keyword_"
+	if strings.HasPrefix(name, prefix) {
+		return prefix + name
+	}
+	switch name {
+	case "False", "None", "True", "and", "as", "assert", "async", "await",
+		"break", "class", "continue", "def", "del", "elif", "else", "except",
+		"finally", "for", "from", "global", "if", "import", "in", "is",
+		"lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+		"while", "with", "yield", "__debug__":
+		return prefix + name
+	}
+	return name
 }
 
 func pythonType(typ Type) string {

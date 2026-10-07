@@ -43,6 +43,170 @@ module @ax.validate version "0.1" {
     }
   }
 
+  op ax.validate.semantic @prompt_value_matches_type {
+    attr core_kind = "func"
+    attr emit_module = "schema"
+    attr private = true
+    tag "src/ax/dsp/util.ts"
+    type signature = "(string, json) -> bool"
+    body @entry(%name: string, %value: json) {
+      %string = core.call intrinsic.eq(%name, "string")
+      %code = core.call intrinsic.eq(%name, "code")
+      %class = core.call intrinsic.eq(%name, "class")
+      %text_type = core.call intrinsic.or(%string, %code)
+      %string_type = core.call intrinsic.or(%text_type, %class)
+      core.if %string_type {
+        %valid = core.type_is %value type "string"
+        core.return %valid
+      }
+      %number_type = core.call intrinsic.eq(%name, "number")
+      core.if %number_type {
+        %valid = core.type_is %value type "number"
+        core.return %valid
+      }
+      %boolean_type = core.call intrinsic.eq(%name, "boolean")
+      core.if %boolean_type {
+        %valid = core.type_is %value type "boolean"
+        core.return %valid
+      }
+      %date_name = core.call intrinsic.eq(%name, "date")
+      %datetime_name = core.call intrinsic.eq(%name, "datetime")
+      %date_type = core.call intrinsic.or(%date_name, %datetime_name)
+      core.if %date_type {
+        %text = core.type_is %value type "string"
+        %date = core.type_is %value type "date"
+        %valid = core.call intrinsic.or(%text, %date)
+        core.return %valid
+      }
+      %date_range = core.call intrinsic.eq(%name, "dateRange")
+      %datetime_range = core.call intrinsic.eq(%name, "datetimeRange")
+      %range_type = core.call intrinsic.or(%date_range, %datetime_range)
+      core.if %range_type {
+        %text = core.type_is %value type "string"
+        core.if %text {
+          core.return true
+        }
+        %object = core.type_is %value type "object"
+        core.if %object {
+          %start = core.call intrinsic.map.contains(%value, "start")
+          %end = core.call intrinsic.map.contains(%value, "end")
+          %valid = core.call intrinsic.and(%start, %end)
+          core.return %valid
+        }
+        core.return false
+      }
+      %json_type = core.call intrinsic.eq(%name, "json")
+      %object_type = core.call intrinsic.eq(%name, "object")
+      %structured_type = core.call intrinsic.or(%json_type, %object_type)
+      core.if %structured_type {
+        %object = core.type_is %value type "object"
+        %list = core.type_is %value type "list"
+        %date = core.type_is %value type "date"
+        %null = core.call intrinsic.is_none(%value)
+        %text = core.type_is %value type "string"
+        %json_text = core.call intrinsic.and(%json_type, %text)
+        %collection = core.call intrinsic.or(%object, %list)
+        %special_object = core.call intrinsic.or(%date, %null)
+        %any_object = core.call intrinsic.or(%collection, %special_object)
+        %valid = core.call intrinsic.or(%any_object, %json_text)
+        core.return %valid
+      }
+      %image = core.call intrinsic.eq(%name, "image")
+      core.if %image {
+        %valid = core.call intrinsic.media.valid_image(%value)
+        core.return %valid
+      }
+      %audio = core.call intrinsic.eq(%name, "audio")
+      core.if %audio {
+        %valid = core.call intrinsic.media.valid_audio(%value)
+        core.return %valid
+      }
+      %file = core.call intrinsic.eq(%name, "file")
+      core.if %file {
+        %valid = core.call intrinsic.media.valid_file(%value)
+        core.return %valid
+      }
+      %url = core.call intrinsic.eq(%name, "url")
+      core.if %url {
+        %valid = core.call intrinsic.media.valid_url_shape(%value)
+        core.return %valid
+      }
+      core.return false
+    }
+  }
+
+  op ax.validate.semantic @validate_prompt_value {
+    attr core_kind = "func"
+    attr effect = "throws"
+    attr emit_module = "schema"
+    tag "src/ax/dsp/util.ts"
+    type signature = "(Field, json) -> void throws"
+    body @entry(%field: Field, %value: json) {
+      %type = core.get %field["type"]
+      %name = core.get %type["name"] default "string"
+      %array = core.get %type["is_array"] default false
+      %media_types = core.map
+      core.set %media_types["image"] = "object ({ mimeType: string; data: string })"
+      core.set %media_types["audio"] = "string or object ({ data: string; format?: string })"
+      core.set %media_types["file"] = "object ({ mimeType: string; data: string } | { mimeType: string; fileUri: string })"
+      core.set %media_types["url"] = "string or object ({ url: string; title?: string; description?: string })"
+      %media = core.call intrinsic.map.contains(%media_types, %name)
+      %list = core.type_is %value type "list"
+      %valid = core.let true
+      %accept_array = core.call intrinsic.or(%array, %media)
+      %check_items = core.call intrinsic.and(%list, %accept_array)
+      core.if %check_items {
+        core.for %item in %value {
+          %item_valid = core.call @prompt_value_matches_type(%name, %item)
+          %valid = core.call intrinsic.and(%valid, %item_valid)
+        }
+      } else {
+        %not_media = core.call intrinsic.not(%media)
+        %requires_array = core.call intrinsic.and(%array, %not_media)
+        core.if %requires_array {
+          %valid = core.let false
+        } else {
+          %valid = core.call @prompt_value_matches_type(%name, %value)
+        }
+      }
+      core.if %valid {
+        core.return
+      }
+      %field_name = core.get %field["name"]
+      core.if %media {
+        %expected = core.get %media_types[%name]
+        %text = core.call intrinsic.string.str(%value)
+        %message = core.call intrinsic.string.format("Validation failed: Expected '{}' to be type '{}' instead got '{}'", %field_name, %expected, %text)
+        %error = core.call intrinsic.error.validation(%message)
+        core.raise %error
+      }
+      %got = core.let "object"
+      %text = core.type_is %value type "string"
+      core.if %text {
+        %got = core.let "string"
+      }
+      %number = core.type_is %value type "number"
+      core.if %number {
+        %got = core.let "number"
+      }
+      %boolean = core.type_is %value type "boolean"
+      core.if %boolean {
+        %got = core.let "boolean"
+      }
+      core.if %list {
+        %got = core.let "array"
+      }
+      %prefix = core.let ""
+      core.if %array {
+        %prefix = core.let "an array of "
+      }
+      %encoded = core.call intrinsic.json.stringify(%value)
+      %message = core.call intrinsic.string.format("Validation failed: Expected '{}' to be a {}{} instead got '{}' ({})", %field_name, %prefix, %name, %got, %encoded)
+      %error = core.call intrinsic.error.validation(%message)
+      core.raise %error
+    }
+  }
+
   op ax.validate.semantic @strip_internal_fields {
     attr core_kind = "func"
     attr emit_module = "schema"
@@ -87,8 +251,6 @@ module @ax.validate version "0.1" {
         core.if %missing_or_null {
           %required_missing = core.call intrinsic.not(%is_optional)
           core.if %required_missing {
-            // A forward's inputs fail as TS fails rendering them
-            // (src/ax/dsp/prompt.ts), by field name.
             %is_input = core.call intrinsic.eq(%context, "input")
             core.if %is_input {
               %input_message = core.call intrinsic.string.format("Value for input field '{}' is required.", %field_name)
@@ -144,8 +306,6 @@ module @ax.validate version "0.1" {
     body @entry(%value: string, %field: Field) {
       %typ = core.get %field["type"]
       %title = core.get %field["title"]
-      // As in TS (String.prototype.length), a string's length counts UTF-16
-      // code units: an emoji counts two.
       %units = core.call intrinsic.string.utf16_units(%value)
       %length = core.call intrinsic.len(%units)
       %min_length = core.get %typ["min_length"]
@@ -198,8 +358,6 @@ module @ax.validate version "0.1" {
         %valid_url = core.call intrinsic.url.valid(%value)
         %invalid_url = core.call intrinsic.not(%valid_url)
         core.if %invalid_url {
-          // A string field's url or uri format fails as TS's
-          // createStringConstraintError(field, value, 'format', 'valid URL').
           %message = core.call intrinsic.string.format("Field '{}' failed validation: String must be a valid URL. You provided: \"{}\".", %title, %value)
           %error = core.call intrinsic.error.validation(%message)
           core.raise %error
@@ -324,9 +482,6 @@ module @ax.validate version "0.1" {
         }
         core.return
       }
-      // TS validateValue takes a Date for a date or datetime field and an
-      // object with start and end for a range, besides a string. The ports
-      // take their native date and time values where TS takes a Date.
       %date_types = core.list
       core.append %date_types, "date"
       core.append %date_types, "datetime"
@@ -476,9 +631,6 @@ module @ax.validate version "0.1" {
     tag "src/ax/dsp/extract/structuredJson.ts"
     type signature = "(json) -> list<json>"
     body @entry(%fields_map: json) {
-      // As TS's structured-output validation (nestedFieldFromType), a nested
-      // object's fields are titled by their keys, so an error names the key
-      // the model wrote ('username', not 'Username').
       %out = core.list
       %nested_fields = core.call intrinsic.fields.from_map(%fields_map)
       core.for %nested in %nested_fields {

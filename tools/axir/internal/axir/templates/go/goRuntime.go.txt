@@ -16284,10 +16284,18 @@ func runConformanceFlowMermaid(fixture map[string]Value) {
 		assertEqual(built.String(), coreGet(fixture, "expected_rendered", ""), "flow mermaid builder render")
 		return
 	}
+	if fixture["operation"] != nil && operation != "roundtrip" {
+		panic(AxError{Category: "fixture", Message: "unknown flow mermaid operation " + operation})
+	}
 	first := NewFlow(display(coreGet(fixture, "document", "")), bindings)
-	expected := coreGet(fixture, "expected_rerendered", coreGet(fixture, "expected_rendered", ""))
-	assertEqual(first.String(), expected, "flow mermaid render")
+	if expectedDirection, ok := fixture["expected_direction"]; ok {
+		ast, err := _flow_mermaid_parse(fixture["document"])
+		if err != nil { panic(err) }
+		assertEqual(coreGet(ast, "direction", nil), expectedDirection, "flow mermaid source direction")
+	}
+	assertEqual(first.String(), coreGet(fixture, "expected_rendered", nil), "flow mermaid render")
 	second := NewFlow(first.String(), bindings)
+	expected := coreGet(fixture, "expected_rerendered", coreGet(fixture, "expected_rendered", nil))
 	assertEqual(second.String(), expected, "flow mermaid canonical roundtrip")
 }
 

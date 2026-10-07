@@ -760,6 +760,10 @@ a:hover {
   color: var(--amber);
 }
 
+.language-mark-lisp {
+  color: var(--green);
+}
+
 .language-menu {
   position: relative;
   min-width: 0;

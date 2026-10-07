@@ -36,6 +36,8 @@ func Compile(bundle Bundle, target, outDir string) error {
 		emitErr = EmitGo(model, outDir)
 	case "rust":
 		emitErr = EmitRust(model, outDir)
+	case "lisp":
+		emitErr = EmitLisp(model, outDir)
 	default:
 		return fmt.Errorf("unknown compile target %q", target)
 	}
@@ -257,6 +259,7 @@ func EmitJava(model AxRuntimeModel, outDir string) error {
 		"dev/axllm/ax/AxMCPStdioTransport.java":                       javaAxMCPStdioTransport,
 		"dev/axllm/ax/AxMCPOAuthOptions.java":                         javaAxMCPOAuthOptions,
 		"dev/axllm/ax/AxMCPTokenSet.java":                             javaAxMCPTokenSet,
+		"dev/axllm/ax/AxMCPAppBridge.java":                            javaAxMCPAppBridge,
 		"dev/axllm/ax/AxMCPScriptedTransport.java":                    javaAxMCPScriptedTransport,
 		"dev/axllm/ax/AxAgentClarificationException.java":             javaAxAgentClarificationException,
 		"dev/axllm/ax/AxCodeRuntime.java":                             javaAxCodeRuntime,
@@ -775,6 +778,11 @@ type APIReferenceSymbol struct {
 }
 
 func BuildCapabilityManifest(model AxRuntimeModel, target string) (CapabilityManifest, error) {
+	// Lisp derives its claims from the native runner's declaration instead
+	// of inheriting the default targets' suites and real-network claims.
+	if target == "lisp" {
+		return BuildLispCapabilityManifest(model)
+	}
 	idiom, ok := model.TargetIdioms[target]
 	if !ok {
 		return CapabilityManifest{}, fmt.Errorf("unknown target %q", target)
@@ -1939,6 +1947,11 @@ func runtimeProfileCoverageCategory(target, id string) string {
 }
 
 func BuildConformanceCoverageManifest(model AxRuntimeModel, target string) (ConformanceCoverageManifest, error) {
+	// Lisp coverage comes from the native runner's explicit declaration
+	// rather than the default targets' coverage categories below.
+	if target == "lisp" {
+		return BuildLispConformanceCoverage(model)
+	}
 	manifest, err := BuildCapabilityManifest(model, target)
 	if err != nil {
 		return ConformanceCoverageManifest{}, err
@@ -2039,6 +2052,8 @@ func BuildConformanceCoverageManifest(model AxRuntimeModel, target string) (Conf
 		{"axmcp", "mcp", "tasks_v2_input_required", "transport-boundary"},
 		{"axmcp", "mcp", "tasks_v2_violations", "semantic"},
 		{"axmcp", "mcp", "server_requests_legacy", "transport-boundary"},
+		{"axmcp", "mcp", "server_requests_sampling", "transport-boundary"},
+		{"axmcp", "mcp", "app_bridge", "transport-boundary"},
 		{"axmcp", "mcp", "mrtr_roots", "transport-boundary"},
 		{"axmcp", "mcp", "mrtr_elicitation", "transport-boundary"},
 		{"axmcp", "mcp", "tool_authorization", "transport-boundary"},
@@ -2317,6 +2332,8 @@ func packageNameForTarget(target string) string {
 	case "go":
 		return "github.com/ax-llm/ax/packages/go"
 	case "rust":
+		return "axllm"
+	case "lisp":
 		return "axllm"
 	default:
 		return target

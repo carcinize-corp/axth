@@ -1,0 +1,1197 @@
+{
+  "schema_version": "axir-api-v1",
+  "axir_version": "0.1",
+  "target": "lisp",
+  "package_name": "axllm",
+  "sections": [
+    {
+      "id": "signatures",
+      "title": "Signatures",
+      "summary": "Parse, render and introspect Ax signatures, and build JSON Schema from them. Signature semantics come from generated Core; this package chooses the Lisp names.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "s",
+          "public_name": "s",
+          "kind": "function",
+          "description": "Build a validated signature from field specs built with f, as TypeScript's s() with a field map. Signature text goes through parse-signature instead.",
+          "form": "(ax:s \u0026key inputs outputs description)",
+          "important_options": [
+            ":inputs",
+            ":outputs",
+            ":description"
+          ],
+          "returns": "a signature record (a JSON object Core owns)",
+          "example": "(ax:s :inputs (ax:object \"question\" (ax:f \"string\")) :outputs (ax:object \"answer\" (ax:f \"string\")))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "parse_signature",
+          "public_name": "parse-signature",
+          "kind": "function",
+          "description": "Parse and validate signature text.",
+          "form": "(ax:parse-signature text)",
+          "returns": "a validated signature record",
+          "example": "(ax:parse-signature \"review:string -\u003e sentiment:class \\\"positive, negative\\\"\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "f",
+          "public_name": "f",
+          "kind": "function",
+          "description": "Build a field type for a signature built from specs.",
+          "form": "(ax:f type \u0026key description fields options array array-description optional internal cache min max email url pattern pattern-description value-descriptions format language)",
+          "returns": "a field-type record",
+          "example": "(ax:f \"number\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "signature_to_string",
+          "public_name": "signature-string",
+          "kind": "function",
+          "description": "Render a signature back to signature text.",
+          "form": "(ax:signature-string signature)",
+          "returns": "a string that parses to an equal signature",
+          "example": "(ax:signature-string (ax:parse-signature \"question:string -\u003e answer:string\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "signature_fields",
+          "public_name": "signature-fields",
+          "kind": "function",
+          "description": "The signature's fields on one side, in Ax's published camelCase shape.",
+          "form": "(ax:signature-fields signature \u0026key side)",
+          "important_options": [
+            ":side :input",
+            ":side :output"
+          ],
+          "returns": "a JSON array of field objects",
+          "example": "(ax:signature-fields (ax:parse-signature \"question:string -\u003e answer:string\") :side :output)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "to_json_schema",
+          "public_name": "json-schema",
+          "kind": "function",
+          "description": "A JSON Schema for the signature's fields on one side.",
+          "form": "(ax:json-schema signature \u0026key side title strict flexible-json-as-string options)",
+          "important_options": [
+            ":side",
+            ":title",
+            ":strict",
+            ":flexible-json-as-string"
+          ],
+          "returns": "a JSON Schema object",
+          "example": "(ax:json-schema (ax:parse-signature \"question:string -\u003e answer:string\") :side :output :strict t)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "render_prompt",
+          "public_name": "render-prompt",
+          "kind": "function",
+          "description": "Render the system and user messages Core builds for a signature and its input values.",
+          "form": "(ax:render-prompt signature values \u0026key functions options)",
+          "returns": "a JSON array of chat messages",
+          "example": "(ax:render-prompt (ax:parse-signature \"question:string -\u003e answer:string\") (ax:object \"question\" \"why?\"))"
+        }
+      ]
+    },
+    {
+      "id": "axgen",
+      "title": "AxGen",
+      "summary": "Typed generation over a signature: prompt rendering, output parsing, correction turns, bounded tool rounds, and the program hooks an optimizer reads and rewrites.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "ax",
+          "public_name": "ax",
+          "kind": "function",
+          "description": "Create a generator for a signature.",
+          "form": "(ax:ax signature \u0026key description tools max-steps max-retries id instruction options)",
+          "important_options": [
+            ":description",
+            ":tools",
+            ":max-steps",
+            ":max-retries",
+            ":id",
+            ":instruction"
+          ],
+          "returns": "a generator",
+          "example": "(ax:ax \"question:string -\u003e answer:string\" :max-retries 1)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxGen.forward",
+          "public_name": "forward",
+          "kind": "generic function",
+          "description": "Run a program against a client. Options are a JSON object of per-call settings; a method ignores keys it does not implement.",
+          "form": "(ax:forward program client inputs \u0026optional options)",
+          "important_options": [
+            "\"maxSteps\"",
+            "\"maxRetries\"",
+            "\"freshMemory\"",
+            "\"model\""
+          ],
+          "returns": "two values: the typed outputs object and this call's usage object",
+          "example": "(ax:forward (ax:ax \"question:string -\u003e answer:string\") client (ax:object \"question\" \"why?\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxGen.streamingForward",
+          "public_name": "program-streaming-forward",
+          "kind": "generic function",
+          "description": "Run a program with a streaming sink. A program that cannot be driven by a prefix refuses this call rather than inheriting a silent fallback to forward.",
+          "form": "(ax:program-streaming-forward program client inputs \u0026optional options)",
+          "returns": "two values: the outputs object and the usage object",
+          "example": "(ax:program-streaming-forward program client inputs (ax:object \"sink\" sink))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.getUsage",
+          "public_name": "program-usage",
+          "kind": "generic function",
+          "description": "The program's token usage so far, per ai and model.",
+          "form": "(ax:program-usage program)",
+          "returns": "a JSON array of usage objects",
+          "example": "(ax:program-usage program)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.getTraces",
+          "public_name": "program-traces",
+          "kind": "generic function",
+          "description": "The program's completed runs, each with status, input, output, chat log and function calls.",
+          "form": "(ax:program-traces program)",
+          "returns": "a JSON array of trace objects",
+          "example": "(ax:program-traces program)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.getChatLog",
+          "public_name": "program-chat-log",
+          "kind": "generic function",
+          "description": "The provider turns the program recorded, oldest first.",
+          "form": "(ax:program-chat-log program)",
+          "returns": "a JSON array of chat-log objects",
+          "example": "(ax:program-chat-log program)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.setInstruction",
+          "public_name": "program-set-instruction",
+          "kind": "generic function",
+          "description": "Replace the program's prompt instruction text.",
+          "form": "(ax:program-set-instruction program text)",
+          "returns": "the program",
+          "example": "(ax:program-set-instruction program \"Answer in one sentence.\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.getOptimizableComponents",
+          "public_name": "program-optimizable-components",
+          "kind": "generic function",
+          "description": "The parts of the program an optimizer may rewrite, each with an id, owner, kind, current value and constraints.",
+          "form": "(ax:program-optimizable-components program)",
+          "returns": "a JSON array of component objects",
+          "example": "(ax:program-optimizable-components program)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.applyOptimizedComponents",
+          "public_name": "program-apply-optimized-components",
+          "kind": "generic function",
+          "description": "Apply a component id to text map. An id the program does not own is ignored, so one map can be applied to a whole composition.",
+          "form": "(ax:program-apply-optimized-components program component-map)",
+          "returns": "the program",
+          "example": "(ax:program-apply-optimized-components program (ax:object \"root::instruction\" \"Be terse.\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProgram.getSignature",
+          "public_name": "program-signature",
+          "kind": "generic function",
+          "description": "The program's parsed signature, or :null when it declares none.",
+          "form": "(ax:program-signature program)",
+          "returns": "a signature record or :null",
+          "example": "(ax:program-signature program)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "bestOfN",
+          "public_name": "best-of-n",
+          "kind": "function",
+          "description": "Score several candidates of a program with a reward function and return the best.",
+          "form": "(ax:best-of-n program \u0026key n reward-fn threshold fail-count model-config strategy on-attempt)",
+          "important_options": [
+            ":n",
+            ":reward-fn",
+            ":threshold",
+            ":fail-count",
+            ":strategy",
+            ":on-attempt"
+          ],
+          "returns": "a program that scores candidates",
+          "example": "(ax:best-of-n program :n 3 :reward-fn reward)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "refine",
+          "public_name": "refine",
+          "kind": "function",
+          "description": "Refine a program over reward-scored rounds, appending advice to its instruction components and restoring them afterwards.",
+          "form": "(ax:refine program \u0026key rounds samples-per-round reward-fn threshold fail-count model-config strategy feedback-client feedback-model-config reward-description program-description on-attempt)",
+          "important_options": [
+            ":rounds",
+            ":samples-per-round",
+            ":reward-fn",
+            ":threshold",
+            ":feedback-client"
+          ],
+          "returns": "a program that refines over rounds",
+          "example": "(ax:refine program :rounds 2 :reward-fn reward)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "synth",
+          "public_name": "synth",
+          "kind": "function",
+          "description": "Generate synthetic labelled examples for a signature with a teacher client.",
+          "form": "(ax:synth signature \u0026key teacher diversity domain edge-cases temperature model)",
+          "important_options": [
+            ":teacher",
+            ":domain",
+            ":edge-cases",
+            ":temperature",
+            ":model"
+          ],
+          "returns": "a synthesizer",
+          "example": "(ax:synth \"question:string -\u003e answer:string\" :teacher teacher :domain \"support\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxTestPrompt",
+          "public_name": "test-prompt",
+          "kind": "class",
+          "description": "Score a program over labelled examples with a metric function.",
+          "form": "ax:test-prompt",
+          "important_options": [
+            ":client",
+            ":program",
+            ":examples",
+            ":debug"
+          ],
+          "returns": "a test prompt",
+          "example": "(ax:test-prompt :client client :program program :examples examples)"
+        }
+      ]
+    },
+    {
+      "id": "axai",
+      "title": "AxAI",
+      "summary": "Provider clients and the service protocol every client answers, plus cancellation, usage and rate-limit boundaries.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "ai",
+          "public_name": "ai",
+          "kind": "function",
+          "description": "Create a provider client. The provider is selected by name rather than by a per-provider class. Omit :model to use the profile's default from Core's descriptor; a profile without a default requires :model.",
+          "form": "(ax:ai \u0026key name model api-key base-url transport timeout max-tokens)",
+          "important_options": [
+            ":name",
+            ":model",
+            ":api-key",
+            ":base-url",
+            ":transport",
+            ":timeout",
+            ":max-tokens"
+          ],
+          "returns": "an AI client",
+          "example": "(ax:ai :name \"openai\" :model \"gpt-6-luna\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIService.chat",
+          "public_name": "ax-chat",
+          "kind": "generic function",
+          "description": "The service protocol's chat call, which every client answers.",
+          "form": "(ax:ax-chat service request \u0026optional options)",
+          "returns": "a normalized chat response object",
+          "example": "(ax:ax-chat client request (ax:object))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIService.stream",
+          "public_name": "ax-stream",
+          "kind": "generic function",
+          "description": "The service protocol's streaming chat call.",
+          "form": "(ax:ax-stream service request \u0026optional options)",
+          "returns": "a stream handle",
+          "example": "(ax:ax-stream client request (ax:object))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIService.embed",
+          "public_name": "ax-embed",
+          "kind": "generic function",
+          "description": "The service protocol's embeddings call.",
+          "form": "(ax:ax-embed service request \u0026optional options)",
+          "returns": "a normalized embeddings response object",
+          "example": "(ax:ax-embed client request (ax:object))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIService.getFeatures",
+          "public_name": "ax-features",
+          "kind": "generic function",
+          "description": "What the client supports for a model: functions, streaming, media and more.",
+          "form": "(ax:ax-features service \u0026optional model)",
+          "returns": "a features object",
+          "example": "(ax:ax-features client \"gpt-6-luna\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "chat",
+          "public_name": "chat",
+          "kind": "function",
+          "description": "One normalized chat request against a client, as the generator issues it.",
+          "form": "(ax:chat client messages \u0026key tools tool-choice model)",
+          "important_options": [
+            ":tools",
+            ":tool-choice",
+            ":model"
+          ],
+          "returns": "a response object with content, toolCalls and usage",
+          "example": "(ax:chat client messages :tool-choice :auto)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "get_supported_ai_models",
+          "public_name": "supported-ai-models",
+          "kind": "function",
+          "description": "Core's provider-model catalogue, optionally narrowed by model type, such as \"code\" or \"embeddings\". The filter is best-effort: types are trimmed and lowercased, and an omitted, blank or unknown type returns the whole catalogue. These are catalogue entries, not provider profile ids or a live provider inventory.",
+          "form": "(ax:supported-ai-models \u0026optional model-type)",
+          "important_options": [
+            "model-type"
+          ],
+          "returns": "a JSON array of provider entries with their model catalogues",
+          "example": "(ax:supported-ai-models \"code\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "model_catalog_summary",
+          "public_name": "model-catalog-summary",
+          "kind": "function",
+          "description": "Core's catalogue audit: its version, descriptor-covered provider ids and deferred provider ids. This is coverage metadata, not a model list; supported-ai-models returns the catalogue.",
+          "form": "(ax:model-catalog-summary)",
+          "returns": "a JSON object describing catalogue coverage",
+          "example": "(ax:model-catalog-summary)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "model_info",
+          "public_name": "model-info",
+          "kind": "function",
+          "description": "Look up a model's catalogue entry under a provider profile. This is the metadata the expensive-model gate reads; a model absent from the catalogue returns :null.",
+          "form": "(ax:model-info profile model)",
+          "returns": "the model's catalogue entry, or :null",
+          "example": "(ax:model-info \"openai\" \"gpt-6-luna\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "provider_profiles",
+          "public_name": "provider-profiles",
+          "kind": "function",
+          "description": "Every provider profile Core knows, sorted, read from Core's registry. These are profile ids, not models; supported-ai-models returns the separate provider-model catalogue.",
+          "form": "(ax:provider-profiles)",
+          "returns": "a Lisp list of profile id strings",
+          "example": "(ax:provider-profiles)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxRateLimitInfo",
+          "public_name": "rate-limiter-token-usage",
+          "kind": "class",
+          "description": "The token usage a rate limiter is given for a call, with the remaining budget read back through rate-limiter-available.",
+          "form": "ax:rate-limiter-token-usage",
+          "returns": "a rate-limiter token usage object",
+          "example": "(ax:rate-limiter-available limiter)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIService.getMetrics",
+          "public_name": "ax-metrics",
+          "kind": "generic function",
+          "description": "A service's latency and error metrics, read from the client. This is not a host telemetry meter.",
+          "form": "(ax:ax-metrics service)",
+          "returns": "a metrics object",
+          "example": "(ax:ax-metrics client)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "provider",
+          "public_name": "provider",
+          "kind": "function",
+          "description": "Create a provider client for a profile. Omit :model to use the profile's default from Core's descriptor; a profile without a default requires :model. :credential-provider takes a per-client function that receives a JSON object of profile, operation, method and url and returns a header object (a hash table). A non-function is a configuration error; a non-object result is an authentication error. The ai factory does not accept this callback keyword.",
+          "form": "(ax:provider \u0026key profile name model embed-model api-key base-url api-version options model-config transport streaming-transport timeout credential-provider)",
+          "important_options": [
+            ":profile",
+            ":model",
+            ":api-key",
+            ":base-url",
+            ":transport",
+            ":credential-provider"
+          ],
+          "returns": "a provider client",
+          "example": "(ax:provider :profile \"openai\" :model \"gpt-6-luna\" :credential-provider handler)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxGlobals",
+          "public_name": "globals-snapshot",
+          "kind": "function",
+          "description": "An isolated snapshot of the process-wide Ax globals. The names are fixed and camelCase: signatureStrict, tracer, meter, rateLimiter, logger, optimizerLogger, debug, abortSignal, customLabels, onUsage, cachingFunction and functionResultFormatter. This is runtime context, not a serializable export.",
+          "form": "(ax:globals-snapshot)",
+          "returns": "a JSON object of the current globals",
+          "example": "(ax:globals-snapshot)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "set_tracer",
+          "public_name": "set-global",
+          "kind": "function",
+          "description": "Install a process-wide global by its camelCase name, such as \"tracer\". There is no setter per global, and a name the globals do not have is rejected rather than stored.",
+          "form": "(ax:set-global name value)",
+          "returns": "the value that was set",
+          "example": "(ax:set-global \"tracer\" tracer)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "set_meter",
+          "public_name": "update-globals",
+          "kind": "function",
+          "description": "Apply several globals at once, such as \"meter\" and \"rateLimiter\". Every name is validated before anything is applied, so a misspelling changes nothing.",
+          "form": "(ax:update-globals config)",
+          "returns": "a snapshot of the globals after the update",
+          "example": "(ax:update-globals (ax:object \"meter\" meter))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "set_rate_limiter",
+          "public_name": "reset-globals",
+          "kind": "function",
+          "description": "Globals are process state, so a test or a host that installed a tracer, meter or rate limiter can put the defaults back. A limiter itself is installed with set-global under \"rateLimiter\".",
+          "form": "(ax:reset-globals)",
+          "returns": "a snapshot of the restored globals",
+          "example": "(ax:reset-globals)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "start_active_span",
+          "public_name": "start-active-span-fail-open",
+          "kind": "function",
+          "description": "Run an operation inside a span from an explicit tracer. It fails open: a tracer that signals, or :null instead of a tracer, still runs the operation exactly once and preserves its values and its original error. No span is ended on the caller's behalf.",
+          "form": "(ax:start-active-span-fail-open tracer name options parent-context operation)",
+          "returns": "the operation's values",
+          "example": "(ax:start-active-span-fail-open tracer \"ax.gen\" (ax:object) :null handler)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxRuntimeHooks",
+          "public_name": "runtime-hook-frame",
+          "kind": "struct",
+          "description": "One call's resolved globals, carried in that call's options under a symbol key so JSON, cache and export see string keys only and a concurrent call cannot read another call's frame.",
+          "form": "(ax:make-runtime-hook-frame \u0026key globals resolved)",
+          "returns": "a runtime hook frame",
+          "example": "(ax:options-with-runtime-hook-frame options (ax:make-runtime-hook-frame))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxProviderDescriptor",
+          "public_name": "provider-descriptor-of",
+          "kind": "accessor",
+          "description": "The provider descriptor behind a client, which is how provider mapping stays Core-owned.",
+          "form": "ax:provider-descriptor-of",
+          "returns": "a provider descriptor record",
+          "example": "(ax:provider-name (ax:provider-descriptor-of client))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIService.getName",
+          "public_name": "ax-service-name",
+          "kind": "generic function",
+          "description": "The service name a client reports, which is how a caller tells providers apart without a per-provider class.",
+          "form": "(ax:ax-service-name service)",
+          "returns": "a string",
+          "example": "(ax:ax-service-name client)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxCancellationToken",
+          "public_name": "cancellation-token",
+          "kind": "class",
+          "description": "A cancellation token a caller passes into a call and cancels from another thread.",
+          "form": "(ax:make-cancellation-token)",
+          "returns": "a cancellation token",
+          "example": "(ax:cancel (make-instance 'ax:cancellation-token) \"user stopped\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIServiceAbortedError",
+          "public_name": "provider-error-aborted-p",
+          "kind": "function",
+          "description": "Whether a signalled provider error is a cancellation. The Lisp port reports an aborted call as a kind on the single provider-error condition rather than a separate class.",
+          "form": "(ax:provider-error-aborted-p condition)",
+          "returns": "a generalized boolean",
+          "example": "(ax:provider-error-aborted-p condition)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxRateLimiter",
+          "public_name": "rate-limiter-acquire",
+          "kind": "function",
+          "description": "The rate-limiter protocol a host implements: acquire before a call, with the token usage and remaining budget read back.",
+          "form": "(ax:rate-limiter-acquire limiter tokens \u0026key cancellation)",
+          "returns": "nil once the call may proceed",
+          "example": "(ax:rate-limiter-acquire limiter (ax:usage-object 10 2))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxUsage",
+          "public_name": "usage-object",
+          "kind": "function",
+          "description": "Build the usage object every response and program carries.",
+          "form": "(ax:usage-object prompt completion \u0026optional total)",
+          "returns": "a usage object with promptTokens, completionTokens and totalTokens",
+          "example": "(ax:usage-object 11 7)"
+        }
+      ]
+    },
+    {
+      "id": "agents-rlm",
+      "title": "Agents And RLM",
+      "summary": "Agents, their actor steps and action logs, and the host code-runtime boundary a runtime language plugs into.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "agent",
+          "public_name": "agent",
+          "kind": "function",
+          "description": "Create an agent for a signature.",
+          "form": "(ax:agent signature \u0026key options)",
+          "important_options": [
+            ":options"
+          ],
+          "returns": "an agent",
+          "example": "(ax:agent \"question:string -\u003e answer:string\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAgent.forward",
+          "public_name": "agent-forward",
+          "kind": "function",
+          "description": "Run the agent's staged pipeline against a client.",
+          "form": "(ax:agent-forward agent client values \u0026key options)",
+          "returns": "two values: the outputs object and the usage object",
+          "example": "(ax:agent-forward agent client (ax:object \"question\" \"why?\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAgent.streaming_forward",
+          "public_name": "agent-streaming-forward",
+          "kind": "function",
+          "description": "Run the agent with a streaming sink.",
+          "form": "(ax:agent-streaming-forward agent client values sink \u0026key options)",
+          "returns": "two values: the outputs object and the usage object",
+          "example": "(ax:agent-streaming-forward agent client inputs (ax:object \"sink\" sink))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAgent.add_child_agent",
+          "public_name": "agent-add-child",
+          "kind": "function",
+          "description": "Add a child agent, which becomes a namespaced callable in the actor's inventory.",
+          "form": "(ax:agent-add-child agent namespace name child)",
+          "returns": "the agent",
+          "example": "(ax:agent-add-child parent \"research\" \"summarize\" child)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAgent.getActionLog",
+          "public_name": "agent-action-log",
+          "kind": "function",
+          "description": "The agent's action log, in the order Core wrote the records.",
+          "form": "(ax:agent-action-log agent)",
+          "returns": "a JSON array of action records",
+          "example": "(ax:agent-action-log agent)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAgent.discover",
+          "public_name": "agent-discover",
+          "kind": "function",
+          "description": "The effect-only discovery call that loads full docs for a callable.",
+          "form": "(ax:agent-discover agent request)",
+          "returns": "a discovery payload object",
+          "example": "(ax:agent-discover agent (ax:object \"callables\" (vector \"tools.search\")))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxCodeRuntime",
+          "public_name": "code-runtime",
+          "kind": "class",
+          "description": "The host code-runtime boundary: a runtime language, its usage instructions and the sessions it creates.",
+          "form": "ax:code-runtime",
+          "returns": "a code runtime",
+          "example": "(ax:runtime-language runtime)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxCodeSession",
+          "public_name": "code-session",
+          "kind": "class",
+          "description": "One runtime session: execute an actor step, inspect or patch globals, export and restore state, and close.",
+          "form": "ax:code-session",
+          "returns": "a code session",
+          "example": "(ax:session-execute session code (ax:object))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAgent.setState",
+          "public_name": "agent-set-state",
+          "kind": "function",
+          "description": "Replace the agent's minimal state, as a state round trip restores it.",
+          "form": "(ax:agent-set-state agent state)",
+          "returns": "the agent",
+          "example": "(ax:agent-set-state agent (ax:object \"notes\" \"none\"))"
+        }
+      ]
+    },
+    {
+      "id": "flow",
+      "title": "Flow",
+      "summary": "Composable program graphs: steps, branches, loops, parallel merges, traces and Mermaid rendering.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "flow",
+          "public_name": "flow",
+          "kind": "class",
+          "description": "Create a flow program graph.",
+          "form": "ax:flow",
+          "returns": "a flow",
+          "example": "(ax:flow)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.node",
+          "public_name": "flow-node-extended",
+          "kind": "function",
+          "description": "Declare a node in the graph, with its program and signature.",
+          "form": "(ax:flow-node-extended flow name base-signature \u0026key extended-signature options)",
+          "returns": "the flow",
+          "example": "(ax:flow-node-extended graph \"qa\" \"question:string -\u003e answer:string\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.execute",
+          "public_name": "flow-execute",
+          "kind": "function",
+          "description": "Execute a node with state mapped into its inputs.",
+          "form": "(ax:flow-execute flow name program \u0026optional options)",
+          "returns": "the flow",
+          "example": "(ax:flow-execute graph \"qa\" program)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.branch",
+          "public_name": "flow-branch",
+          "kind": "function",
+          "description": "Branch the graph on a predicate over the state.",
+          "form": "(ax:flow-branch flow name predicate branches \u0026optional options)",
+          "returns": "the flow",
+          "example": "(ax:flow-branch graph \"route\" predicate branches)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.parallel",
+          "public_name": "flow-parallel",
+          "kind": "function",
+          "description": "Run independent branches and merge their reports in plan order.",
+          "form": "(ax:flow-parallel flow name results \u0026optional options)",
+          "returns": "the flow",
+          "example": "(ax:flow-parallel graph \"fanout\" branches)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.returns",
+          "public_name": "flow-returns",
+          "kind": "function",
+          "description": "Map the final state to the flow's outputs.",
+          "form": "(ax:flow-returns flow returns)",
+          "returns": "the flow",
+          "example": "(ax:flow-returns graph mapper)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.mermaid",
+          "public_name": "flow-mermaid",
+          "kind": "function",
+          "description": "Render the graph as Mermaid, for documentation and review.",
+          "form": "(ax:flow-mermaid flow \u0026optional options)",
+          "returns": "a Mermaid diagram string",
+          "example": "(ax:flow-mermaid graph)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFlow.getUsage",
+          "public_name": "flow-usage",
+          "kind": "function",
+          "description": "The flow's merged token usage.",
+          "form": "(ax:flow-usage flow)",
+          "returns": "a JSON array of usage objects",
+          "example": "(ax:flow-usage graph)"
+        }
+      ]
+    },
+    {
+      "id": "tools",
+      "title": "Tools",
+      "summary": "Tool definitions, argument validation and bounded execution, including the function processor generated code resolves names through.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "fn",
+          "public_name": "tool",
+          "kind": "function",
+          "description": "Define a tool from a name, a JSON Schema for its arguments and a handler.",
+          "form": "(ax:tool \u0026key name description parameters handler)",
+          "important_options": [
+            ":name",
+            ":description",
+            ":parameters",
+            ":handler"
+          ],
+          "returns": "a tool spec",
+          "example": "(ax:tool :name \"lookup\" :description \"Look up a key\" :handler handler)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFunctionJSONSchema",
+          "public_name": "tool-request-spec",
+          "kind": "function",
+          "description": "The wire spec for a tool, as a provider request carries it.",
+          "form": "(ax:tool-request-spec spec)",
+          "returns": "a JSON object with name, description and parameters",
+          "example": "(ax:tool-request-spec spec)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFunctionProcessor",
+          "public_name": "function-processor",
+          "kind": "class",
+          "description": "The processor generated code resolves tool names through, so a renamed tool stays callable.",
+          "form": "(ax:make-function-processor tools)",
+          "returns": "a function processor",
+          "example": "(ax:function-processor-resolve processor \"lookup\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "validateJSONSchema",
+          "public_name": "validate-tool-arguments",
+          "kind": "function",
+          "description": "Validate a tool call's arguments against its schema before the handler runs.",
+          "form": "(ax:validate-tool-arguments spec arguments)",
+          "returns": "two values: the validated arguments and a list of problems",
+          "example": "(ax:validate-tool-arguments spec arguments)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxFunctionError",
+          "public_name": "function-call-error",
+          "kind": "condition",
+          "description": "A tool call that could not be executed, with the problems that stopped it.",
+          "form": "ax:function-call-error",
+          "returns": "a condition",
+          "example": "(ax:execute-function spec arguments)"
+        }
+      ]
+    },
+    {
+      "id": "mcp",
+      "title": "MCP",
+      "summary": "MCP clients, transports, tasks, the Apps host bridge, and the OAuth boundary.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPClient",
+          "public_name": "mcp-client",
+          "kind": "class",
+          "description": "An MCP client over a transport: catalogs, tools, prompts, resources, tasks and subscriptions.",
+          "form": "(ax:make-mcp-client transport \u0026rest options)",
+          "returns": "an MCP client",
+          "example": "(ax:make-mcp-client transport (ax:object \"era\" \"modern\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPClient.init",
+          "public_name": "mcp-init",
+          "kind": "function",
+          "description": "Initialize the session: negotiate the protocol version and era and load the catalogs.",
+          "form": "(ax:mcp-init client)",
+          "returns": "the client",
+          "example": "(ax:mcp-init client)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPClient.callTool",
+          "public_name": "mcp-call-tool",
+          "kind": "function",
+          "description": "A tool call waits for a modern server's task by default, can expose it as its CreateTaskResult, or can return the call's outcome, as TypeScript's callTool taskHandling and callToolOutcome. A legacy server's task-shaped result is a complete result.",
+          "form": "(ax:mcp-call-tool client name arguments \u0026key context task-handling)",
+          "returns": "the tool result object",
+          "example": "(ax:mcp-call-tool client \"lookup\" (ax:object \"key\" \"a\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPStdioTransport",
+          "public_name": "mcp-stdio-transport",
+          "kind": "class",
+          "description": "The stdio transport, with Ax's line framing.",
+          "form": "(ax:make-mcp-stdio-transport command \u0026key arguments environment directory)",
+          "returns": "a transport",
+          "example": "(ax:make-mcp-stdio-transport \"server\" :arguments (list \"--stdio\"))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPStreambleHTTPTransport",
+          "public_name": "mcp-streamable-http-transport",
+          "kind": "class",
+          "description": "The streamable HTTP transport, including session headers and the OAuth boundary.",
+          "form": "(ax:make-mcp-streamable-http-transport endpoint \u0026rest options)",
+          "returns": "a transport",
+          "example": "(ax:make-mcp-streamable-http-transport \"https://example.com/mcp\" (ax:object))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPTransport",
+          "public_name": "mcp-transport",
+          "kind": "class",
+          "description": "The transport protocol every MCP transport answers: send a request, a notification or a response, set the handlers, and open or close a request stream.",
+          "form": "ax:mcp-transport",
+          "returns": "a transport",
+          "example": "(ax:mcp-transport-send transport message)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMCPApp",
+          "public_name": "mcp-app-bridge",
+          "kind": "class",
+          "description": "The Apps host bridge: it validates the ui:// resource and runs the host's callbacks for a frame's requests.",
+          "form": "(ax:make-mcp-app-bridge client tool \u0026rest options)",
+          "returns": "an App bridge",
+          "example": "(ax:mcp-app-bridge-load-resource bridge)"
+        }
+      ]
+    },
+    {
+      "id": "runtime-profiles",
+      "title": "Runtime Profiles",
+      "summary": "The runtime protocol a host code runtime speaks, and the envelopes it exchanges.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "ProcessCodeRuntime",
+          "public_name": "process-runtime",
+          "kind": "class",
+          "description": "The process runtime profile: a host runtime spoken to over the runtime protocol on stdio.",
+          "form": "(ax:make-process-runtime command \u0026key cwd env language timeout)",
+          "returns": "a code runtime",
+          "example": "(ax:make-process-runtime (list \"node\" \"runtime-server.mjs\") :language \"JavaScript\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "RuntimeCapabilities",
+          "public_name": "runtime-capabilities",
+          "kind": "function",
+          "description": "What a runtime reports it can do, which is what a caller checks before using callables.",
+          "form": "(ax:runtime-capabilities \u0026key inspect snapshot patch abort language usage-instructions)",
+          "returns": "a capabilities object",
+          "example": "(ax:runtime-capabilities :language \"JavaScript\" :patch nil)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "RuntimeEnvelope",
+          "public_name": "envelope-result",
+          "kind": "function",
+          "description": "The runtime protocol's envelopes are plain JSON records built by constructor functions, one per envelope kind, rather than an envelope class.",
+          "form": "(ax:envelope-result value)",
+          "returns": "a result envelope object",
+          "example": "(ax:envelope-result (ax:object \"value\" 1))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "RuntimeProtocolError",
+          "public_name": "runtime-protocol-error",
+          "kind": "condition",
+          "description": "A runtime that broke the protocol, with the category that says how.",
+          "form": "ax:runtime-protocol-error",
+          "returns": "a condition",
+          "example": "(ax:runtime-protocol-error-category condition)"
+        }
+      ]
+    },
+    {
+      "id": "optimizers",
+      "title": "Optimizers",
+      "summary": "Optimizer engines, evaluators, cost tracking, checkpoints and optimized-program records.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "optimize",
+          "public_name": "optimize-program",
+          "kind": "function",
+          "description": "Run an optimizer engine over a program and return its optimized-program record.",
+          "form": "(ax:optimize-program program dataset \u0026key engine client options evaluator)",
+          "important_options": [
+            ":engine",
+            ":evaluator",
+            ":examples",
+            ":budget"
+          ],
+          "returns": "an optimized-program record (a JSON object)",
+          "example": "(ax:optimize-program program examples :engine engine :client client :evaluator evaluator)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxBootstrapFewShot",
+          "public_name": "bootstrap-few-shot",
+          "kind": "class",
+          "description": "The bootstrap few-shot engine, which selects demonstrations from scored examples.",
+          "form": "(ax:make-bootstrap-few-shot \u0026optional options)",
+          "returns": "an optimizer engine",
+          "example": "(ax:make-bootstrap-few-shot (ax:object \"maxDemos\" 4))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxGEPA",
+          "public_name": "gepa",
+          "kind": "class",
+          "description": "The GEPA engine, with its Pareto component selector.",
+          "form": "(ax:make-gepa \u0026key reflection options seed)",
+          "returns": "an optimizer engine",
+          "example": "(ax:make-gepa :options (ax:object \"maxIterations\" 8))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "OptimizerEngine",
+          "public_name": "optimizer-engine",
+          "kind": "class",
+          "description": "The engine protocol: a name, a version and one run call Core drives.",
+          "form": "ax:optimizer-engine",
+          "returns": "an optimizer engine",
+          "example": "(ax:run-optimizer-engine engine request evaluator)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxMetricFn",
+          "public_name": "program-evaluator",
+          "kind": "class",
+          "description": "The evaluator a candidate is scored with, together with its metric-call and budget accounting.",
+          "form": "(ax:make-program-evaluator program client \u0026key dataset options rollout metric max-metric-calls cancel)",
+          "returns": "a program evaluator",
+          "example": "(ax:make-program-evaluator program client :metric metric :dataset examples)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxOptimizedProgram",
+          "public_name": "make-optimized-program",
+          "kind": "function",
+          "description": "An optimized program is a plain JSON record rather than a type: these functions build it, parse it and apply it to a program.",
+          "form": "(ax:make-optimized-program \u0026key best-score stats component-map selector-state demos examples model-config optimizer-type optimization-time total-rounds converged score-history configuration-history artifact-format-version instruction-schema)",
+          "returns": "an optimized-program record",
+          "example": "(ax:apply-optimized-program program record)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxOptimizerCheckpoint",
+          "public_name": "optimizer-checkpoint",
+          "kind": "function",
+          "description": "A checkpoint of an optimizer run, which a later run loads to continue.",
+          "form": "(ax:optimizer-checkpoint state \u0026key optimizer-type optimizer-config best-score best-configuration engine-state)",
+          "returns": "a checkpoint object",
+          "example": "(ax:load-optimizer-checkpoint (ax:make-optimizer-state) checkpoint)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "f1_score",
+          "public_name": "f1-score",
+          "kind": "function",
+          "description": "The F1 evaluation metric over predicted and expected text.",
+          "form": "(ax:f1-score prediction ground-truth)",
+          "returns": "a number between 0 and 1",
+          "example": "(ax:f1-score \"a b c\" \"a b\")"
+        }
+      ]
+    },
+    {
+      "id": "errors-values",
+      "title": "Errors And Values",
+      "summary": "The JSON value model every surface shares, and the condition hierarchy Ax signals.",
+      "symbols": [
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxJSONValue",
+          "public_name": "object",
+          "kind": "function",
+          "description": "Build a JSON object. Objects are string-keyed equal hash tables with their key order preserved; arrays are vectors, booleans are ax:true and ax:false, and null is :null.",
+          "form": "(ax:object \u0026rest alternating-key-values)",
+          "returns": "a JSON object",
+          "example": "(ax:object \"question\" \"why?\" \"count\" 2)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxJSONValue.get",
+          "public_name": "jget",
+          "kind": "function",
+          "description": "Read a key or index, defaulting to :null so a missing key reads as JSON null rather than nil.",
+          "form": "(ax:jget object key \u0026optional default)",
+          "returns": "the value at the key, or the default",
+          "example": "(ax:jget outputs \"answer\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "parse_json",
+          "public_name": "parse-json",
+          "kind": "function",
+          "description": "Parse one complete JSON document into the shared value model.",
+          "form": "(ax:parse-json string)",
+          "returns": "a JSON value",
+          "example": "(ax:parse-json \"{\\\"a\\\":[1,2]}\")"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "encode_json",
+          "public_name": "encode-json",
+          "kind": "function",
+          "description": "Render a JSON value as compact JSON text, preserving object key order.",
+          "form": "(ax:encode-json value \u0026key indent sort-keys)",
+          "returns": "a JSON string",
+          "example": "(ax:encode-json (ax:object \"a\" 1))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxError",
+          "public_name": "ax-error",
+          "kind": "condition",
+          "description": "The base condition every Ax error inherits, carrying the message Ax wrote.",
+          "form": "ax:ax-error",
+          "returns": "a condition",
+          "example": "(ax:ax-error-message condition)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxAIServiceError",
+          "public_name": "provider-error",
+          "kind": "condition",
+          "description": "A typed provider failure: its kind, provider, status and retryability, with messages redacted of credentials.",
+          "form": "ax:provider-error",
+          "returns": "a condition",
+          "example": "(ax:provider-error-kind condition)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxGenerateError",
+          "public_name": "generation-error",
+          "kind": "condition",
+          "description": "A generation failure, with the validation problems when the kind is :validation.",
+          "form": "ax:generation-error",
+          "returns": "a condition",
+          "example": "(ax:generation-error-problems condition)"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxSignatureValidationError",
+          "public_name": "signature-error",
+          "kind": "condition",
+          "description": "An invalid signature: bad syntax, an unknown type or modifier, or a colliding field name.",
+          "form": "ax:signature-error",
+          "returns": "a condition",
+          "example": "(handler-case (ax:parse-signature \"not a signature\")\n  (ax:signature-error (condition) (ax:ax-error-message condition)))"
+        },
+        {
+          "target_name": "lisp",
+          "canonical_name": "AxCancellationToken.cancel",
+          "public_name": "cancel",
+          "kind": "function",
+          "description": "Cancel a token, which ends the waits and calls subscribed to it.",
+          "form": "(ax:cancel token \u0026optional reason)",
+          "returns": "the token",
+          "example": "(ax:cancel token \"user stopped\")"
+        }
+      ]
+    }
+  ],
+  "missing_canonical_symbols": [
+    {
+      "canonical_name": "AnthropicClient",
+      "section": "axai",
+      "reason": "the anthropic profile is reached as (ai :name \"anthropic\") against one client type, so there is no per-provider class"
+    },
+    {
+      "canonical_name": "AxCredentialProvider",
+      "section": "axai",
+      "reason": "the boundary exists as provider's :credential-provider callback, documented above, but it is a plain function per client: no credential-provider type, global registration or ai keyword is exported"
+    },
+    {
+      "canonical_name": "AxCredentialRequest",
+      "section": "axai",
+      "reason": "the credential callback receives a plain JSON object of profile, operation, method and url, so there is no named credential-request type to document"
+    },
+    {
+      "canonical_name": "AxMeter",
+      "section": "axai",
+      "reason": "no meter type is exported: a host meter is stored under the \"meter\" global and called through telemetry-call; ax-metrics returns service statistics, not a telemetry meter"
+    },
+    {
+      "canonical_name": "AxTracer",
+      "section": "axai",
+      "reason": "no tracer type is exported: a host tracer object or callback is passed to start-span-fail-open and start-active-span-fail-open, or stored under the \"tracer\" global, and reached through telemetry-call by camelCase method name"
+    },
+    {
+      "canonical_name": "AxUsageContext",
+      "section": "axai",
+      "reason": "no named usage-context type is exported: provider options and call options carry plain usageContext objects, merged by Core for chat usage events"
+    },
+    {
+      "canonical_name": "AxUsageEvent",
+      "section": "axai",
+      "reason": "no named usage-event type is exported: the provider chat path builds a plain event object with Core and passes it to the onUsage callback when usage is available"
+    },
+    {
+      "canonical_name": "AxUsageObserver",
+      "section": "axai",
+      "reason": "no observer type is exported: onUsage is a plain callback in globals or provider/call options; the provider chat path invokes it and ignores callback errors, without implying observer coverage for every operation"
+    },
+    {
+      "canonical_name": "GoogleGeminiClient",
+      "section": "axai",
+      "reason": "the google-gemini profile is reached as (ai :name \"google-gemini\") against one client type, so there is no per-provider class"
+    },
+    {
+      "canonical_name": "OpenAICompatibleClient",
+      "section": "axai",
+      "reason": "one client type serves every provider: (ai :name \"openai-compatible\") selects the profile and provider-profiles lists the profiles Core knows, so there is no per-provider class to document"
+    },
+    {
+      "canonical_name": "OpenAIResponsesClient",
+      "section": "axai",
+      "reason": "the openai-responses profile is implemented and appears in provider-profiles; it is reached as (ai :name \"openai-responses\") rather than through a per-provider class"
+    },
+    {
+      "canonical_name": "set_usage_observer",
+      "section": "axai",
+      "reason": "no dedicated observer setter is exported: use set-global with \"onUsage\" or provider/call options; the provider chat path reads that callback, but this does not establish stream or embedding observer parity"
+    }
+  ]
+}

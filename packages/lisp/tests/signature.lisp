@@ -331,7 +331,10 @@
     (dolist (path files)
       (let ((name (pathname-name path)))
         (handler-case
-            (progn (run-fixture (read-fixture path)) (incf passed))
+            (progn
+              (run-fixture (read-fixture path))
+              (axllm/conformance:record-result suite path :semantic)
+              (incf passed))
           (error (condition)
             (push (cons name (princ-to-string condition)) failures)))))
     (values passed (nreverse failures))))

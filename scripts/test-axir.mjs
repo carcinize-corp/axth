@@ -41,7 +41,10 @@ class CommandFailure extends Error {
 
 try {
   phase('go test', () =>
-    run('go', ['test', '-count=1', '-timeout=30m', './...'], {
+    // This full suite serially compiles and executes several native backends,
+    // including repeated C++ conformance and SBCL compilation. The fast CI
+    // subset keeps its separate ten-minute bound.
+    run('go', ['test', '-v', '-count=1', '-timeout=90m', './...'], {
       cwd: axirDir,
       env,
     })
@@ -62,7 +65,7 @@ try {
         '0',
         '--progress',
         '--targets',
-        'python,java,cpp,go,rust',
+        'python,java,cpp,go,rust,lisp',
         '--workdir',
         verifyDir,
         rootAxir,

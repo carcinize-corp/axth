@@ -1,0 +1,457 @@
+{
+  "name": "mcp apps host bridge policy and dispatch",
+  "kind": "mcp",
+  "operation": "app_bridge",
+  "source": {
+    "reference": ["src/ax/mcp/apps.ts", "ir/axcore/mcp.axir"],
+    "note": "Core owns the App policy: mcp_app_tool_meta, mcp_app_tool_visible_to, mcp_app_csp_source_list, mcp_app_resource_policy, mcp_app_resource_plan and mcp_app_view_message_plan. The host owns reading the resource, decoding a blob body and running its own callbacks."
+  },
+  "client_options": { "era": "legacy", "namespace": "shop" },
+  "responses": [
+    {
+      "method": "initialize",
+      "result": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": { "tools": {}, "resources": {} },
+        "serverInfo": { "name": "scripted-mcp", "version": "1.0.0" }
+      }
+    },
+    {
+      "method": "tools/list",
+      "result": {
+        "tools": [
+          {
+            "name": "picker",
+            "description": "Pick an item",
+            "inputSchema": { "type": "object", "properties": {} },
+            "_meta": {
+              "ui": {
+                "resourceUri": "ui://shop/picker",
+                "visibility": ["model", "app"]
+              }
+            }
+          },
+          {
+            "name": "model_only",
+            "description": "Never reachable from a frame",
+            "inputSchema": { "type": "object", "properties": {} },
+            "_meta": { "ui": { "visibility": ["model"] } }
+          },
+          {
+            "name": "unmarked",
+            "description": "No ui metadata at all",
+            "inputSchema": { "type": "object", "properties": {} }
+          }
+        ]
+      }
+    },
+    { "method": "resources/list", "result": { "resources": [] } },
+    {
+      "method": "resources/templates/list",
+      "result": { "resourceTemplates": [] }
+    }
+  ],
+  "tool": "picker",
+  "visibility_cases": [
+    { "tool": "picker", "principal": "app", "expected": true },
+    { "tool": "picker", "principal": "model", "expected": true },
+    { "tool": "model_only", "principal": "app", "expected": false },
+    { "tool": "model_only", "principal": "model", "expected": true },
+    { "tool": "unmarked", "principal": "app", "expected": true },
+    { "tool": "unmarked", "principal": "model", "expected": true }
+  ],
+  "expected_tool_meta": {
+    "resourceUri": "ui://shop/picker",
+    "visibility": ["model", "app"],
+    "hasVisibility": true
+  },
+  "resource_read": {
+    "method": "resources/read",
+    "result": {
+      "contents": [
+        {
+          "uri": "ui://shop/picker",
+          "mimeType": "text/html;profile=mcp-app",
+          "text": "<!doctype html><html><body>picker</body></html>",
+          "_meta": {
+            "ui": {
+              "csp": {
+                "resourceDomains": ["https://cdn.example.com"],
+                "connectDomains": [
+                  "https://api.example.com",
+                  "wss://live.example.com"
+                ],
+                "frameDomains": [],
+                "baseUriDomains": []
+              },
+              "permissions": { "camera": {}, "clipboardWrite": {} }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "expected_resource": {
+    "uri": "ui://shop/picker",
+    "mimeType": "text/html;profile=mcp-app",
+    "html": "<!doctype html><html><body>picker</body></html>",
+    "sandbox": "allow-scripts allow-same-origin",
+    "contentSecurityPolicy": "default-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.example.com; style-src 'self' 'unsafe-inline' https://cdn.example.com; connect-src 'self' https://api.example.com wss://live.example.com; img-src 'self' data: https://cdn.example.com; font-src 'self' https://cdn.example.com; media-src 'self' data: https://cdn.example.com; frame-src 'none'; object-src 'none'; base-uri 'self'",
+    "permissionPolicy": "camera; clipboard-write"
+  },
+  "invalid_resources": [
+    {
+      "note": "a non-App MIME type must never reach a frame",
+      "content": {
+        "uri": "ui://shop/picker",
+        "mimeType": "text/html",
+        "text": "<!doctype html><html></html>"
+      },
+      "expected_error_contains": "invalid MIME type"
+    },
+    {
+      "note": "a body that is not an HTML document must be refused",
+      "content": {
+        "uri": "ui://shop/picker",
+        "mimeType": "text/html;profile=mcp-app",
+        "text": "{\"not\":\"html\"}"
+      },
+      "expected_error_contains": "is not an HTML document"
+    },
+    {
+      "note": "a CSP source that could break out of the directive must be refused",
+      "content": {
+        "uri": "ui://shop/picker",
+        "mimeType": "text/html;profile=mcp-app",
+        "text": "<html></html>",
+        "_meta": {
+          "ui": {
+            "csp": {
+              "connectDomains": ["https://evil.example.com; script-src *"]
+            }
+          }
+        }
+      },
+      "expected_error_contains": "Unsafe MCP App CSP source"
+    },
+    {
+      "note": "a plain http source is not an allowed App origin",
+      "content": {
+        "uri": "ui://shop/picker",
+        "mimeType": "text/html;profile=mcp-app",
+        "text": "<html></html>",
+        "_meta": {
+          "ui": { "csp": { "connectDomains": ["http://api.example.com"] } }
+        }
+      },
+      "expected_error_contains": "Unsafe MCP App CSP source"
+    }
+  ],
+  "blob_resource": {
+    "content": {
+      "uri": "ui://shop/picker",
+      "mimeType": "text/html;profile=mcp-app",
+      "blob": "PGh0bWw+PGJvZHk+YmxvYjwvYm9keT48L2h0bWw+"
+    },
+    "expected_html": "<html><body>blob</body></html>"
+  },
+  "pre_initialize_cases": [
+    {
+      "note": "a notification before initialization is a protocol error",
+      "message": {
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {}
+      },
+      "expected_error_contains": "before initialization"
+    },
+    {
+      "note": "a request before initialization is answered, not executed",
+      "message": { "jsonrpc": "2.0", "id": "pre-1", "method": "ping" },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "pre-1",
+        "error": { "code": -32000, "message": "MCP App is not initialized" }
+      }
+    }
+  ],
+  "initialize_message": {
+    "jsonrpc": "2.0",
+    "id": "init-1",
+    "method": "ui/initialize"
+  },
+  "expected_initialize_response": {
+    "jsonrpc": "2.0",
+    "id": "init-1",
+    "result": {
+      "protocolVersion": "2026-01-26",
+      "hostCapabilities": {
+        "serverTools": { "listChanged": true },
+        "serverResources": { "listChanged": true },
+        "logging": {},
+        "sandbox": {}
+      },
+      "hostContext": {}
+    }
+  },
+  "request_cases": [
+    {
+      "note": "an app-visible tool call reaches the client",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "call-1",
+        "method": "tools/call",
+        "params": { "name": "picker", "arguments": { "item": "sku-1" } }
+      },
+      "response": {
+        "method": "tools/call",
+        "result": { "structuredContent": { "picked": "sku-1" } }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "call-1",
+        "result": { "structuredContent": { "picked": "sku-1" } }
+      },
+      "expected_tool_request": {
+        "name": "picker",
+        "arguments": { "item": "sku-1" }
+      }
+    },
+    {
+      "note": "a model-only tool is not reachable from a frame",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "call-2",
+        "method": "tools/call",
+        "params": { "name": "model_only", "arguments": {} }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "call-2",
+        "error": {
+          "code": -32000,
+          "message": "MCP App cannot call tool model_only"
+        }
+      },
+      "expected_tool_requests": 0
+    },
+    {
+      "note": "an unknown tool is refused without a wire call",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "call-3",
+        "method": "tools/call",
+        "params": { "name": "nope", "arguments": {} }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "call-3",
+        "error": { "code": -32000, "message": "MCP App cannot call tool nope" }
+      },
+      "expected_tool_requests": 0
+    },
+    {
+      "note": "a tools/call without a name is refused",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "call-4",
+        "method": "tools/call",
+        "params": {}
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "call-4",
+        "error": { "code": -32000, "message": "Missing tool name" }
+      },
+      "expected_tool_requests": 0
+    },
+    {
+      "note": "a non-HTTP link is refused before the host callback runs",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "link-1",
+        "method": "ui/open-link",
+        "params": { "url": "javascript:alert(1)" }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "link-1",
+        "error": { "code": -32000, "message": "MCP App link must be HTTP(S)" }
+      },
+      "expected_open_links": 0
+    },
+    {
+      "note": "an HTTPS link reaches the host callback",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "link-2",
+        "method": "ui/open-link",
+        "params": { "url": "https://example.com/item" }
+      },
+      "expected_response": { "jsonrpc": "2.0", "id": "link-2", "result": {} },
+      "expected_open_links": 1,
+      "expected_opened_url": "https://example.com/item"
+    },
+    {
+      "note": "an invalid display mode is refused",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "mode-1",
+        "method": "ui/request-display-mode",
+        "params": { "mode": "cinema" }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "mode-1",
+        "error": { "code": -32000, "message": "Invalid MCP App display mode" }
+      }
+    },
+    {
+      "note": "the host grants the mode, not the frame",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "mode-2",
+        "method": "ui/request-display-mode",
+        "params": { "mode": "fullscreen" }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "mode-2",
+        "result": { "mode": "inline" }
+      }
+    },
+    {
+      "note": "a model-context update is stamped untrusted with its source",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "ctx-1",
+        "method": "ui/update-model-context",
+        "params": { "structuredContent": { "selected": "sku-1" } }
+      },
+      "expected_response": { "jsonrpc": "2.0", "id": "ctx-1", "result": {} },
+      "expected_model_context_update": {
+        "structuredContent": { "selected": "sku-1" },
+        "untrusted": true,
+        "source": { "kind": "mcp-app", "namespace": "shop", "tool": "picker" }
+      }
+    },
+    {
+      "note": "an unsupported App request is refused",
+      "message": { "jsonrpc": "2.0", "id": "odd-1", "method": "ui/mystery" },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "odd-1",
+        "error": {
+          "code": -32000,
+          "message": "Unsupported MCP App request: ui/mystery"
+        }
+      }
+    }
+  ],
+  "disabled_cases": [
+    {
+      "note": "with no sendMessage callback the host reports it disabled",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "msg-1",
+        "method": "ui/message",
+        "params": {}
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "msg-1",
+        "error": { "code": -32000, "message": "App messages are disabled" }
+      }
+    },
+    {
+      "note": "with no updateModelContext callback the host reports it disabled",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "ctx-2",
+        "method": "ui/update-model-context",
+        "params": { "structuredContent": {} }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "ctx-2",
+        "error": {
+          "code": -32000,
+          "message": "App model-context updates are disabled"
+        }
+      }
+    },
+    {
+      "note": "with no openLink callback the host reports it disabled",
+      "message": {
+        "jsonrpc": "2.0",
+        "id": "link-3",
+        "method": "ui/open-link",
+        "params": { "url": "https://example.com" }
+      },
+      "expected_response": {
+        "jsonrpc": "2.0",
+        "id": "link-3",
+        "error": { "code": -32000, "message": "Link opening is disabled" }
+      }
+    }
+  ],
+  "reserved_notification": {
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "ui/notifications/sandbox-escape",
+      "params": {}
+    },
+    "expected_error_contains": "Reserved MCP App sandbox message"
+  },
+  "size_notification": {
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "ui/notifications/size-changed",
+      "params": { "width": 640, "height": 480 }
+    },
+    "expected_size": { "width": 640, "height": 480 }
+  },
+  "invalid_size_notification": {
+    "message": {
+      "jsonrpc": "2.0",
+      "method": "ui/notifications/size-changed",
+      "params": { "width": "640", "height": 480 }
+    },
+    "expected_sizes": 0
+  },
+  "authorize_denied": {
+    "message": {
+      "jsonrpc": "2.0",
+      "id": "deny-1",
+      "method": "tools/call",
+      "params": { "name": "picker", "arguments": {} }
+    },
+    "expected_response": {
+      "jsonrpc": "2.0",
+      "id": "deny-1",
+      "error": {
+        "code": -32000,
+        "message": "MCP App request denied: call-tool"
+      }
+    },
+    "expected_tool_requests": 0
+  },
+  "expected_notifications": [
+    {
+      "jsonrpc": "2.0",
+      "method": "ui/notifications/tool-input",
+      "params": { "arguments": { "item": "sku-2" } }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "ui/notifications/tool-result",
+      "params": { "structuredContent": { "picked": "sku-2" } }
+    }
+  ],
+  "teardown_reason": "navigated away",
+  "expected_teardown": {
+    "jsonrpc": "2.0",
+    "method": "ui/resource-teardown",
+    "params": { "reason": "navigated away" }
+  }
+}

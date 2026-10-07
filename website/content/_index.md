@@ -92,7 +92,7 @@ description: "Build AI features and agents with DSPy-style programming, RLM agen
   <article class="home-marketing-card" data-home-use-case="classification">{{< home-icon "tags" "icon-violet" >}}<h3>Sort messages automatically</h3><p>Categorize incoming requests, customer feedback, or reviews using the labels you choose.</p><a class="home-card-link" href="/typescript/quick-start/" data-home-lang-href="quick-start/">Build a classifier</a></article>
   <article class="home-marketing-card" data-home-use-case="answers">{{< home-icon "message-circle" "icon-green" >}}<h3>Answer questions using your content</h3><p>Give the model relevant documents and a question to build an assistant for your own content.</p><a class="home-card-link" href="/typescript/examples/generation/" data-home-lang-href="examples/generation/">Explore question answering</a></article>
   <article class="home-marketing-card" data-home-use-case="agents">{{< home-icon "bot" "icon-blue" >}}<h3>Build assistants that use your tools</h3><p>Let an agent look up information, calculate results, and work through several steps to answer a request.</p><a class="home-card-link" href="/typescript/agents/micro/" data-home-lang-href="agents/micro/">Build your first agent</a></article>
-  <article class="home-marketing-card home-audio-card" data-home-use-case="voice">{{< home-icon "activity" "icon-amber" >}}<h3>Add voice to your app</h3><p>Turn recordings into text, generate spoken responses, or add a voice conversation.</p><a class="home-card-link" href="/typescript/examples/#llm-media" data-home-lang-href="examples/#llm-media">Explore voice examples</a></article>
+  <article class="home-marketing-card home-audio-card" data-home-use-case="voice">{{< home-icon "activity" "icon-amber" >}}<h3>Add voice to your app</h3><p>Turn recordings into text, generate spoken responses, or add a voice conversation.</p><a class="home-card-link" href="/typescript/examples/audio/" data-home-lang-href="examples/audio/">Explore voice examples</a></article>
   <article class="home-marketing-card" data-home-use-case="workflows">{{< home-icon "list-checks" "icon-teal" >}}<h3>Automate a sequence of tasks</h3><p>Extract information, analyze it, and produce a report. Use workflows to connect steps, branches, and parallel work.</p><a class="home-card-link" href="/typescript/subsystems/flow/" data-home-lang-href="subsystems/flow/">Build a workflow</a></article>
 </div>
 </section>
@@ -320,7 +320,7 @@ A: 9 of 12 churned accounts were on the Starter plan.
       <li><code>.chat()</code> audio config for conversational or realtime audio turns.</li>
       <li>Agents can transcribe audio inputs and work with the resulting text.</li>
     </ul>
-    <p><a href="/typescript/concepts/llms/" data-home-lang-href="concepts/llms/">Read the LLM guide</a> or <a href="/typescript/examples/#llm-media" data-home-lang-href="examples/#llm-media">open media examples</a>.</p>
+    <p><a href="/typescript/concepts/llms/" data-home-lang-href="concepts/llms/">Read the LLM guide</a> or <a href="/typescript/examples/audio/" data-home-lang-href="examples/audio/">open media examples</a>.</p>
   </div>
   <div>
 {{< home-code topic="audio" group="audio" >}}

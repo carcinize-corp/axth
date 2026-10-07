@@ -1,8 +1,35 @@
 (in-package #:cl-user)
 
 (defun run-jiti-tests ()
-  (assert (handler-case (progn (ax:make-jiti-proposer nil) nil)
-            (type-error () t)))
+  (dolist (invalid (list nil (lambda () :not-a-service)))
+    (assert (handler-case (progn (ax:make-jiti-proposer invalid) nil)
+              (axllm::jiti-action-error () t))))
+  ;; Exercise the public factory and a service wrapper, not just action
+  ;; validation. A concrete client class guard rejects the wrapper even
+  ;; though it supports the same chat protocol.
+  (let* ((requests '())
+         (client (ax:ai :name "openai" :model "gpt-5.4-mini" :api-key "test-key"
+                        :transport
+                        (lambda (url headers body)
+                          (declare (ignore url headers))
+                          (push (ax:parse-json body) requests)
+                          (values
+                           (ax:encode-json
+                            (ax:object "choices"
+                                       (vector (ax:object
+                                                "index" 0 "finish_reason" "stop"
+                                                "message" (ax:object "role" "assistant"
+                                                                     "content" "Action: abort")))))
+                           200))))
+         (boundary (ax:boundary-service client (ax:object))))
+    (dolist (service (list client boundary))
+      (assert (equal '(:action :abort)
+                     (funcall (ax:make-jiti-proposer service)
+                              '(:status :paused :goal "Stop without executing code.")))))
+    (assert (= 2 (length requests)))
+    (dolist (request requests)
+      (assert (equal "gpt-5.4-mini" (ax:jget request "model")))
+      (assert (search "Stop without executing code." (ax:encode-json request)))))
   (flet ((rejects (output &optional view)
            (assert (handler-case (progn (axllm::jiti-action output view) nil)
                      (axllm::jiti-action-error () t)))))

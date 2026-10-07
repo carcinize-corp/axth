@@ -1,0 +1,13 @@
+{
+  "runner": "tests/run.lisp",
+  "command": ["sbcl", "--script", "tests/run.lisp"],
+  "suites": [
+    "signature", "schema", "validation", "prompt", "axgen", "axai",
+    "axagent", "axoptimize", "axprogram", "axflow", "axmcp", "axevent"
+  ],
+  "scriptedTransport": true,
+  "realNetwork": false,
+  "nativeBoundaries": true,
+  "noKeyExamples": ["examples/no-key.lisp"],
+  "runtimeProfiles": ["javascript-process"]
+}

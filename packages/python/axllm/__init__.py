@@ -64,6 +64,7 @@ from .gen import AxGenerateError, AxGen, AxMemory, ax
 from .session import AxChatSession, AxRunControl, run_control
 from .agent import AxAgent, AxAgentClarificationError, AxBootstrapFewShot, AxCodeRuntime, AxCodeSession, AxGEPA, AxPlaybook, OptimizerEngine, OptimizerEvaluator, agent, optimize, playbook
 from .flow import AxFlow, AxProgram, flow
+from .mcp import AxMCPAppBridge
 from .mcp import AxEventCancellationToken, AxEventClock, AxEventCommand, AxEventContinuation, AxEventDeadLetter, AxEventEnvelope, AxEventInputBuilder, AxEventInputError, AxEventInputPlan, AxEventPath, AxEventPublishReceipt, AxEventRoute, AxEventRouteBuilder, AxEventRun, AxEventRuntime, AxEventSink, AxEventSource, AxEventStore, AxEventTarget, AxEventTargetBuilder, AxExecutionContext, AxInMemoryEventStore, AxManualEventClock, AxMCPClient, AxMCPContinuationState, AxMCPEventSource, AxMCPOAuthOptions, AxMCPScriptedTransport, AxMCPStdioTransport, AxMCPWebSocketTransport, AxMCPStreamableHTTPTransport, AxMCPTokenSet, AxMCPTransport, AxPushEventSource, AxSystemEventClock, AxUCPBinding, AxUCPClient, event_input, event_path, event_route, event_target
 from .prompt import AxPromptTemplate, TemplateError, render_template_content, validate_prompt_template_syntax
 from .runtime import ProcessCodeRuntime, ProcessCodeSession, RuntimeCapabilities, RuntimeEnvelope
@@ -133,6 +134,7 @@ __all__ = [
     "AxEventCancellationToken",
     "AxInMemoryEventStore",
     "AxManualEventClock",
+    "AxMCPAppBridge",
     "AxMCPClient",
     "AxMCPContinuationState",
     "AxMCPEventSource",

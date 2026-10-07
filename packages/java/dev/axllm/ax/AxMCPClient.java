@@ -65,7 +65,10 @@ public final class AxMCPClient {
 
   public synchronized void init() {
     if (initialized) return;
-    Object sampling=options.get("sampling");if(sampling!=null&&!Boolean.FALSE.equals(sampling))throw new AxMCPError("MCP sampling is not supported by the generated Java client");
+    // A truthy flag is not a handler. Advertising sampling without one would
+    // make the client lie about what it can answer, so this stays a
+    // rejection; only a callable handler enables sampling.
+    Object sampling=options.get("sampling");if(sampling!=null&&!Boolean.FALSE.equals(sampling)&&samplingHandler()==null)throw new AxMCPError("MCP sampling is not supported without a host handler function");
     transport.connect();
     String configured=String.valueOf(options.getOrDefault("era","auto"));String key=transport.eraCacheKey();String cached=key==null?null:ERA_CACHE.get(key);String stored=null;Object rawStore=options.get("eraStore");if(rawStore instanceof Map<?,?> map&&key!=null)stored=String.valueOf(map.get(key));Map<String,Object> resolution=Core.asMap(Core.mcp_resolve_known_era(configured,transport.eraHint(),cached,stored));String resolved=String.valueOf(resolution.getOrDefault("era","modern"));
     if(!Boolean.TRUE.equals(resolution.get("probe"))){if("legacy".equals(resolved))initializeLegacy();else{applyEra("modern");applyDiscovery(requestDiscovery());refresh();}rememberEra(resolved);initialized=true;if("legacy".equals(resolved))transport.startListening();return;}
@@ -260,6 +263,9 @@ Map<String,String> headers=toolHeaders(name,args);Map<String,Object> result;try{
 
   @SuppressWarnings("unchecked")
   private BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>> elicitationHandler(){Object value=options.get("elicitation");return value instanceof BiFunction<?,?,?>?(BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>>)value:null;}
+  /** The host's sampling handler, or null. A bare "sampling":true option is not a handler. */
+  @SuppressWarnings("unchecked")
+  private BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>> samplingHandler(){Object value=options.get("sampling");return value instanceof BiFunction<?,?,?>?(BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>>)value:null;}
 
   private Map<String,Object> requestWithHeaders(String method,Map<String,Object> params,Map<String,String> headers,boolean allowVersionRetry){
     Map<String, Object> message = new LinkedHashMap<>();
@@ -287,7 +293,7 @@ Map<String,String> headers=toolHeaders(name,args);Map<String,Object> result;try{
 
   private Map<String, Object> clientCapabilities() {
     Map<String, Object> capabilities = new LinkedHashMap<>(Core.asMap(options.get("capabilities")));
-    boolean hasElicitation=elicitationHandler()!=null;Map<String,Object> derived=Core.asMap(Core.mcp_client_capabilities(options.containsKey("roots"),false,hasElicitation,era==null?"legacy":era,!Boolean.FALSE.equals(options.get("tasksExtension"))));for(Map.Entry<String,Object> entry:derived.entrySet())capabilities.putIfAbsent(entry.getKey(),entry.getValue());capabilities.remove("sampling");if(!hasElicitation)capabilities.remove("elicitation");
+    boolean hasElicitation=elicitationHandler()!=null;boolean hasSampling=samplingHandler()!=null;Map<String,Object> derived=Core.asMap(Core.mcp_client_capabilities(options.containsKey("roots"),hasSampling,hasElicitation,era==null?"legacy":era,!Boolean.FALSE.equals(options.get("tasksExtension"))));for(Map.Entry<String,Object> entry:derived.entrySet())capabilities.putIfAbsent(entry.getKey(),entry.getValue());if(!hasSampling)capabilities.remove("sampling");if(!hasElicitation)capabilities.remove("elicitation");
     return capabilities;
   }
 
@@ -312,9 +318,15 @@ Map<String,String> headers=toolHeaders(name,args);Map<String,Object> result;try{
   }
 
   private Map<String,Object> handleServerRequest(Map<String,Object> message){
-    BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>> handler=elicitationHandler();
-    Map<String,Object> plan=Core.asMap(Core.mcp_server_request_plan(message,options.get("roots"),handler!=null));
-    if("respond".equals(plan.get("action")))return cloneMap(Core.asMap(plan.get("response")));
+    // mcp_server_request_plan_full adds the has_sampling branch; the
+    // three-argument mcp_server_request_plan stays in Core and keeps
+    // answering -32601 for sampling, which the fixture asserts separately.
+    BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>> elicitation=elicitationHandler();
+    BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>> sampling=samplingHandler();
+    Map<String,Object> plan=Core.asMap(Core.mcp_server_request_plan_full(message,options.get("roots"),elicitation!=null,sampling!=null));
+    String planAction=String.valueOf(plan.get("action"));
+    BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>> handler="sampling".equals(planAction)?sampling:("elicitation".equals(planAction)?elicitation:null);
+    if(handler==null)return cloneMap(Core.asMap(plan.get("response")));
     try{return new LinkedHashMap<>(Map.of("jsonrpc","2.0","id",plan.get("id"),"result",handler.apply(Core.asMap(plan.get("params")),Map.of("client",this,"namespace",namespace()))));}
     catch(RuntimeException error){return new LinkedHashMap<>(Map.of("jsonrpc","2.0","id",plan.get("id"),"error",Map.of("code",-32603,"message",error.toString())));}
   }
@@ -646,7 +658,9 @@ Map<String,String> headers=toolHeaders(name,args);Map<String,Object> result;try{
         return;
       }
       AxMCPScriptedTransport transport = new AxMCPScriptedTransport(Core.asList(fixture.getOrDefault("responses", fixture.getOrDefault("transport_responses", List.of()))));
-      Map<String,Object> clientOptions=new LinkedHashMap<>(Core.asMap(fixture.get("client_options")));List<Map<String,Object>> elicitationParams=new ArrayList<>();List<Map<String,Object>> elicitationContexts=new ArrayList<>();if(List.of("mrtr_elicitation","tasks_v2_input_required","server_requests_legacy").contains(operation))clientOptions.put("elicitation",(BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>>)(params,context)->{if(Boolean.TRUE.equals(params.get("fail")))throw new AxMCPError("fixture handler failed");elicitationParams.add(cloneMap(params));elicitationContexts.add(new LinkedHashMap<>(context));return Core.asMap(fixture.get("elicitation_result"));});
+      Map<String,Object> clientOptions=new LinkedHashMap<>(Core.asMap(fixture.get("client_options")));List<Map<String,Object>> elicitationParams=new ArrayList<>();List<Map<String,Object>> elicitationContexts=new ArrayList<>();List<Map<String,Object>> samplingParams=new ArrayList<>();List<Map<String,Object>> samplingContexts=new ArrayList<>();
+      if("server_requests_sampling".equals(operation))clientOptions.put("sampling",(BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>>)(params,context)->{samplingParams.add(cloneMap(params));samplingContexts.add(new LinkedHashMap<>(context));return Core.asMap(fixture.get("sampling_result"));});
+      if(List.of("mrtr_elicitation","tasks_v2_input_required","server_requests_legacy").contains(operation))clientOptions.put("elicitation",(BiFunction<Map<String,Object>,Map<String,Object>,Map<String,Object>>)(params,context)->{if(Boolean.TRUE.equals(params.get("fail")))throw new AxMCPError("fixture handler failed");elicitationParams.add(cloneMap(params));elicitationContexts.add(new LinkedHashMap<>(context));return Core.asMap(fixture.get("elicitation_result"));});
       AxMCPClient client = new AxMCPClient(transport, clientOptions);
       client.init();
       if (!"client_discovery".equals(operation) && fixture.get("expected_protocol_version") != null && !String.valueOf(fixture.get("expected_protocol_version")).equals(client.getProtocolVersion())) throw new AssertionError("protocol version mismatch");
@@ -661,8 +675,159 @@ Map<String,String> headers=toolHeaders(name,args);Map<String,Object> result;try{
         client.refresh(false);int catalogs=0;for(Map<String,Object> request:transport.requests){String method=String.valueOf(request.get("method"));if("resources/list".equals(method)||"resources/templates/list".equals(method))catalogs++;}if(catalogs!=((Number)fixture.getOrDefault("expected_catalog_requests_after_fresh_refresh",0)).intValue())throw new AssertionError("fresh catalog issued extra requests: "+catalogs);String uri=String.valueOf(fixture.getOrDefault("uri",""));Map<String,Object> first=client.readResource(uri);Map<String,Object> second=client.readResource(uri);assertSubset(first,fixture.getOrDefault("expected_first",Map.of()),"first resource read");assertSubset(second,fixture.getOrDefault("expected_first",Map.of()),"cached resource read");transport.emit(Core.asMap(fixture.get("notification")));Map<String,Object> after=client.readResource(uri);assertSubset(after,fixture.getOrDefault("expected_after_update",Map.of()),"resource read after update");int reads=0;for(Map<String,Object> request:transport.requests)if("resources/read".equals(request.get("method")))reads++;if(reads!=((Number)fixture.getOrDefault("expected_read_requests",0)).intValue())throw new AssertionError("resource read request count mismatch: "+reads);
       } else if("tasks_v2_modern".equals(operation)){assertSubset(client.callTool("slow",Map.of()),fixture.getOrDefault("expected_call_result",Map.of()),"task call result");client.provideTaskInput("task-1",Map.of());client.cancelTask("task-1");try{client.listTasks(null);throw new AssertionError("missing modern tasks/list rejection");}catch(AxMCPError error){if(!error.getMessage().contains(String.valueOf(fixture.get("expected_list_error"))))throw error;}try{client.getTaskResult("task-1");throw new AssertionError("missing modern tasks/result rejection");}catch(AxMCPError error){if(!error.getMessage().contains(String.valueOf(fixture.get("expected_result_error"))))throw error;}List<String> methods=transport.requests.stream().map(request->String.valueOf(request.get("method"))).toList();if(!methods.equals(Core.asList(fixture.get("expected_methods")).stream().map(String::valueOf).toList()))throw new AssertionError("task request methods mismatch: "+methods);
       } else if("tasks_v2_input_required".equals(operation)){assertSubset(client.callTool("slow",Map.of()),fixture.getOrDefault("expected_result",Map.of()),"task input-required result");if(elicitationParams.size()!=1)throw new AssertionError("task elicitation handler count mismatch");assertSubset(elicitationParams.get(0),fixture.getOrDefault("expected_elicitation_params",Map.of()),"task elicitation params");assertSubset(elicitationContexts.get(0),fixture.getOrDefault("expected_context",Map.of()),"task elicitation context");Map<String,Object> update=transport.requests.stream().filter(request->"tasks/update".equals(request.get("method"))).findFirst().orElseThrow();assertSubset(update.get("params"),fixture.getOrDefault("expected_update_params",Map.of()),"task update params");List<String> methods=transport.requests.stream().map(request->String.valueOf(request.get("method"))).toList();if(!methods.equals(Core.asList(fixture.get("expected_methods")).stream().map(String::valueOf).toList()))throw new AssertionError("task input-required methods mismatch: "+methods);
+      } else if("server_requests_sampling".equals(operation)){
+        // Every inbound request the fixture lists, answered in order.
+        for(Object request:Core.asList(fixture.get("server_requests")))transport.emit(new LinkedHashMap<>(Core.asMap(request)));
+        List<Object> expectedResponses=Core.asList(fixture.get("expected_responses"));
+        if(transport.sentResponses.size()<expectedResponses.size())throw new AssertionError("sampling responses: got "+transport.sentResponses.size()+", want "+expectedResponses.size());
+        for(int i=0;i<expectedResponses.size();i++)assertSubset(transport.sentResponses.get(i),expectedResponses.get(i),"sampling server response "+i);
+        // The handler ran exactly as often as the fixture says. A malformed
+        // request must never reach it.
+        int expectedCalls=((Number)fixture.getOrDefault("expected_handler_calls",1)).intValue();
+        if(samplingParams.size()!=expectedCalls)throw new AssertionError("sampling handler call count: got "+samplingParams.size()+", want "+expectedCalls);
+        assertSubset(samplingParams.get(0),fixture.getOrDefault("expected_handler_params",Map.of()),"sampling handler params");
+        assertSubset(samplingContexts.get(0),fixture.getOrDefault("expected_context",Map.of()),"sampling handler context");
+        // A callable handler is what makes the advertised capability honest.
+        Map<String,Object> initialize=transport.requests.stream().filter(request->"initialize".equals(request.get("method"))).findFirst().orElseThrow();
+        assertSubset(Core.asMap(initialize.get("params")).get("capabilities"),fixture.getOrDefault("expected_capabilities",Map.of()),"sampling client capabilities");
+        // Without a handler the same request is refused and the capability
+        // is not advertised at all.
+        Map<String,Object> withoutHandler=Core.asMap(fixture.get("without_handler"));
+        AxMCPScriptedTransport bareTransport=new AxMCPScriptedTransport(Core.asList(fixture.get("responses")));
+        AxMCPClient bare=new AxMCPClient(bareTransport,new LinkedHashMap<>(Core.asMap(fixture.get("client_options"))));
+        bare.init();
+        bareTransport.emit(new LinkedHashMap<>(Core.asMap(withoutHandler.get("server_request"))));
+        if(bareTransport.sentResponses.isEmpty())throw new AssertionError("no response to sampling without a handler");
+        assertSubset(bareTransport.sentResponses.get(0),withoutHandler.getOrDefault("expected_response",Map.of()),"sampling without a handler");
+        Map<String,Object> bareInitialize=bareTransport.requests.stream().filter(request->"initialize".equals(request.get("method"))).findFirst().orElseThrow();
+        Map<String,Object> bareCapabilities=Core.asMap(Core.asMap(bareInitialize.get("params")).get("capabilities"));
+        for(Object forbidden:Core.asList(withoutHandler.get("forbidden_capabilities")))if(bareCapabilities.containsKey(String.valueOf(forbidden)))throw new AssertionError("capability advertised without a handler: "+forbidden);
+        // The three-argument contract other ports call must not gain sampling.
+        for(Object raw:Core.asList(fixture.get("legacy_plan_cases"))){Map<String,Object> c=Core.asMap(raw);Object actual=Core.mcp_server_request_plan(c.getOrDefault("request",Map.of()),null,false);assertSubset(actual,c.getOrDefault("expected",Map.of()),"legacy three-argument sampling plan");}
+        return;
+      } else if("app_bridge".equals(operation)){
+        List<Object> sent=new ArrayList<>();List<Object> links=new ArrayList<>();List<Object> updates=new ArrayList<>();List<Object> sizes=new ArrayList<>();
+        Map<String,Object> bridgeOptions=new LinkedHashMap<>();
+        bridgeOptions.put("sendToView",(java.util.function.Consumer<Object>)sent::add);
+        bridgeOptions.put("openLink",(java.util.function.Consumer<Object>)links::add);
+        bridgeOptions.put("updateModelContext",(java.util.function.Consumer<Object>)updates::add);
+        bridgeOptions.put("sizeChanged",(java.util.function.Consumer<Object>)sizes::add);
+        bridgeOptions.put("requestDisplayMode",(java.util.function.Function<Object,Object>)mode->"inline");
+        String toolName=String.valueOf(fixture.get("tool"));
+        AxMCPAppBridge bridge=new AxMCPAppBridge(client,toolName,bridgeOptions);
+        Map<String,Map<String,Object>> tools=new LinkedHashMap<>();for(Map<String,Object> tool:client.getTools())tools.put(String.valueOf(tool.get("name")),tool);
+        // Core owns the policy; these assert the generated helpers directly.
+        assertEqual(Core.mcp_app_tool_meta(tools.get(toolName)),fixture.getOrDefault("expected_tool_meta",Map.of()),"App tool meta");
+        for(Object raw:Core.asList(fixture.get("visibility_cases"))){Map<String,Object> c=Core.asMap(raw);
+          assertEqual(Core.mcp_app_tool_visible_to(tools.get(String.valueOf(c.get("tool"))),c.get("principal")),c.get("expected"),"App tool visibility "+c.get("tool"));}
+        transport.responses.add(fixture.get("resource_read"));
+        assertSubset(bridge.loadResource(),fixture.getOrDefault("expected_resource",Map.of()),"App resource");
+        // A fresh client per resource case, so one bad resource cannot
+        // contaminate the next.
+        java.util.function.Function<Object,Map<String,Object>> loadContent=content->{
+          List<Object> responses=new ArrayList<>(Core.asList(fixture.get("responses")));
+          responses.add(new LinkedHashMap<>(Map.of("method","resources/read","result",new LinkedHashMap<>(Map.of("contents",List.of(content))))));
+          AxMCPClient resourceClient=new AxMCPClient(new AxMCPScriptedTransport(responses),new LinkedHashMap<>(Core.asMap(fixture.get("client_options"))));
+          resourceClient.init();
+          return new AxMCPAppBridge(resourceClient,toolName).loadResource();
+        };
+        for(Object raw:Core.asList(fixture.get("invalid_resources"))){Map<String,Object> c=Core.asMap(raw);
+          try{loadContent.apply(c.get("content"));throw new AssertionError("invalid App resource accepted: "+c.get("note"));}
+          catch(AxMCPError error){if(!String.valueOf(error.getMessage()).contains(String.valueOf(c.get("expected_error_contains"))))throw error;}}
+        Map<String,Object> blob=Core.asMap(fixture.get("blob_resource"));
+        assertEqual(loadContent.apply(blob.get("content")).get("html"),blob.get("expected_html"),"App blob resource HTML");
+        // A frame cannot act before it has initialized.
+        for(Object raw:Core.asList(fixture.get("pre_initialize_cases"))){Map<String,Object> c=Core.asMap(raw);
+          if(c.containsKey("expected_error_contains")){
+            try{bridge.handleViewMessage(Core.asMap(c.get("message")));throw new AssertionError("pre-initialize notification accepted");}
+            catch(AxMCPError error){if(!String.valueOf(error.getMessage()).contains(String.valueOf(c.get("expected_error_contains"))))throw error;}
+          } else {
+            assertEqual(bridge.handleViewMessage(Core.asMap(c.get("message"))),c.getOrDefault("expected_response",Map.of()),"pre-initialize response");}}
+        assertEqual(bridge.handleViewMessage(Core.asMap(fixture.get("initialize_message"))),fixture.getOrDefault("expected_initialize_response",Map.of()),"App initialize response");
+        bridge.handleViewMessage(new LinkedHashMap<>(Map.of("jsonrpc","2.0","method","ui/notifications/initialized")));
+        for(Object raw:Core.asList(fixture.get("request_cases"))){Map<String,Object> c=Core.asMap(raw);
+          if(c.containsKey("response"))transport.responses.add(c.get("response"));
+          int requestStart=transport.requests.size();int linkStart=links.size();int updateStart=updates.size();
+          assertEqual(bridge.handleViewMessage(Core.asMap(c.get("message"))),c.getOrDefault("expected_response",Map.of()),"App request: "+c.get("note"));
+          List<Map<String,Object>> calls=transport.requests.subList(requestStart,transport.requests.size()).stream().filter(request->"tools/call".equals(request.get("method"))).toList();
+          if(c.containsKey("expected_tool_request")){if(calls.size()!=1)throw new AssertionError("App tool request count: "+c.get("note"));assertEqual(Core.asMap(calls.get(0).get("params")),c.get("expected_tool_request"),"App tool request params");}
+          if(c.containsKey("expected_tool_requests")&&calls.size()!=((Number)c.get("expected_tool_requests")).intValue())throw new AssertionError("App tool request count: "+c.get("note"));
+          if(c.containsKey("expected_open_links")&&links.size()-linkStart!=((Number)c.get("expected_open_links")).intValue())throw new AssertionError("App open-link count: "+c.get("note"));
+          if(c.containsKey("expected_opened_url"))assertEqual(links.get(links.size()-1),c.get("expected_opened_url"),"App opened URL");
+          if(c.containsKey("expected_model_context_update")){if(updates.size()-updateStart!=1)throw new AssertionError("App model-context update count");assertEqual(updates.get(updates.size()-1),c.get("expected_model_context_update"),"App model-context update");}}
+        // An absent callback is a closed door, not a default.
+        AxMCPAppBridge disabled=new AxMCPAppBridge(client,toolName);
+        disabled.handleViewMessage(new LinkedHashMap<>(Map.of("jsonrpc","2.0","method","ui/notifications/initialized")));
+        for(Object raw:Core.asList(fixture.get("disabled_cases"))){Map<String,Object> c=Core.asMap(raw);
+          assertEqual(disabled.handleViewMessage(Core.asMap(c.get("message"))),c.getOrDefault("expected_response",Map.of()),"App disabled: "+c.get("note"));}
+        Map<String,Object> reserved=Core.asMap(fixture.get("reserved_notification"));
+        try{bridge.handleViewMessage(Core.asMap(reserved.get("message")));throw new AssertionError("reserved sandbox notification accepted");}
+        catch(AxMCPError error){if(!String.valueOf(error.getMessage()).contains(String.valueOf(reserved.get("expected_error_contains"))))throw error;}
+        Map<String,Object> sizeCase=Core.asMap(fixture.get("size_notification"));
+        bridge.handleViewMessage(Core.asMap(sizeCase.get("message")));
+        if(sizes.size()!=1)throw new AssertionError("App size notification count: "+sizes);
+        assertEqual(sizes.get(0),sizeCase.get("expected_size"),"App size notification");
+        sizes.clear();
+        Map<String,Object> invalidSize=Core.asMap(fixture.get("invalid_size_notification"));
+        bridge.handleViewMessage(Core.asMap(invalidSize.get("message")));
+        if(sizes.size()!=((Number)invalidSize.getOrDefault("expected_sizes",0)).intValue())throw new AssertionError("invalid App size notification delivered "+sizes.size()+" size(s)");
+        // A denied request must not reach the client at all.
+        AxMCPAppBridge denied=new AxMCPAppBridge(client,toolName,new LinkedHashMap<>(Map.of("authorize",(java.util.function.Function<Object,Object>)request->false)));
+        denied.handleViewMessage(new LinkedHashMap<>(Map.of("jsonrpc","2.0","method","ui/notifications/initialized")));
+        Map<String,Object> deniedCase=Core.asMap(fixture.get("authorize_denied"));
+        int deniedStart=transport.requests.size();
+        assertEqual(denied.handleViewMessage(Core.asMap(deniedCase.get("message"))),deniedCase.getOrDefault("expected_response",Map.of()),"App authorize denied");
+        if(transport.requests.size()-deniedStart!=((Number)deniedCase.getOrDefault("expected_tool_requests",0)).intValue())throw new AssertionError("denied App request reached the client");
+        bridge.notifyToolInput(new LinkedHashMap<>(Map.of("item","sku-2")));
+        bridge.notifyToolResult(new LinkedHashMap<>(Map.of("structuredContent",new LinkedHashMap<>(Map.of("picked","sku-2")))));
+        assertEqual(sent,fixture.getOrDefault("expected_notifications",List.of()),"App notifications");
+        bridge.teardown(fixture.get("teardown_reason"));
+        assertSubset(sent.get(sent.size()-1),fixture.getOrDefault("expected_teardown",Map.of()),"App teardown");
+        assertEqual(Core.asMap(sent.get(sent.size()-1)).get("id"),1,"App teardown id");
+        // After teardown the frame is uninitialized again.
+        try{bridge.notifyToolInput(Map.of());throw new AssertionError("App still sends notifications after teardown");}
+        catch(AxMCPError error){if(!String.valueOf(error.getMessage()).contains("not initialized"))throw error;}
+
+        // Native regressions the fixture does not reach. Each one is a host
+        // bug or a protocol shape the fixture has no case for, and each
+        // failed before this was written.
+        //
+        // 1. Core validates the mode the frame asks for; nothing validated
+        //    the mode the host grants. A host answering "sidebar" must
+        //    become an error response, not a successful one.
+        AxMCPAppBridge badMode=new AxMCPAppBridge(client,toolName,new LinkedHashMap<>(Map.of("requestDisplayMode",(java.util.function.Function<Object,Object>)mode->"sidebar")));
+        badMode.handleViewMessage(new LinkedHashMap<>(Map.of("jsonrpc","2.0","method","ui/notifications/initialized")));
+        Map<String,Object> badModeResponse=badMode.handleViewMessage(new LinkedHashMap<>(Map.of("jsonrpc","2.0","id","mode-native","method","ui/request-display-mode","params",new LinkedHashMap<>(Map.of("mode","inline")))));
+        if(badModeResponse.containsKey("result"))throw new AssertionError("a host-granted invalid display mode was reported as success");
+        if(!String.valueOf(Core.asMap(badModeResponse.get("error")).get("message")).contains("display mode"))throw new AssertionError("host-granted invalid display mode error is not named: "+badModeResponse.get("error"));
+
+        // 2. A JSON-RPC id may legitimately be null, and Map.of refuses a
+        //    null value, so building the error envelope used to throw.
+        Map<String,Object> nullIDRequest=new LinkedHashMap<>();
+        nullIDRequest.put("jsonrpc","2.0");nullIDRequest.put("id",null);nullIDRequest.put("method","ui/request-display-mode");
+        nullIDRequest.put("params",new LinkedHashMap<>(Map.of("mode","inline")));
+        Map<String,Object> nullIDResponse=badMode.handleViewMessage(nullIDRequest);
+        if(!nullIDResponse.containsKey("id"))throw new AssertionError("error envelope dropped a null JSON-RPC id");
+        if(nullIDResponse.get("id")!=null)throw new AssertionError("error envelope changed a null JSON-RPC id");
+        if(!nullIDResponse.containsKey("error"))throw new AssertionError("a null-id request produced no error envelope");
+
+        // 3. A notification has no id, so a failing host callback has nowhere
+        //    to be reported. It must propagate rather than be swallowed.
+        AxMCPAppBridge failing=new AxMCPAppBridge(client,toolName,new LinkedHashMap<>(Map.of("sendToView",(java.util.function.Consumer<Object>)value->{throw new AxMCPError("host sendToView failed");})));
+        failing.handleViewMessage(new LinkedHashMap<>(Map.of("jsonrpc","2.0","method","ui/notifications/initialized")));
+        try{failing.notifyToolInput(Map.of());throw new AssertionError("a failing notification callback was swallowed");}
+        catch(AxMCPError error){if(!String.valueOf(error.getMessage()).contains("host sendToView failed"))throw error;}
+
+        // 4. Teardown lifecycle, matching the Lisp and Python references: a
+        //    sendToView that fails during teardown propagates and leaves the
+        //    frame initialized, because the frame was never told to go away.
+        if(!failing.isInitialized())throw new AssertionError("the frame should still be initialized before teardown");
+        try{failing.teardown("native");throw new AssertionError("a failing teardown callback was swallowed");}
+        catch(AxMCPError error){if(!String.valueOf(error.getMessage()).contains("host sendToView failed"))throw error;}
+        if(!failing.isInitialized())throw new AssertionError("teardown cleared initialized even though the frame was never told");
+        return;
       } else if("server_requests_legacy".equals(operation)){for(Object request:Core.asList(fixture.get("server_requests")))transport.emit(new LinkedHashMap<>(Core.asMap(request)));List<Object> expected=Core.asList(fixture.get("expected_responses"));for(int i=0;i<expected.size();i++)assertSubset(transport.sentResponses.get(i),expected.get(i),"server response "+i);if(elicitationParams.size()!=1)throw new AssertionError("legacy elicitation handler count mismatch");assertSubset(elicitationParams.get(0),fixture.getOrDefault("expected_elicitation_params",Map.of()),"legacy elicitation params");assertSubset(elicitationContexts.get(0),fixture.getOrDefault("expected_context",Map.of()),"legacy elicitation context");Map<String,Object> initialize=transport.requests.stream().filter(request->"initialize".equals(request.get("method"))).findFirst().orElseThrow();assertSubset(Core.asMap(initialize.get("params")).get("capabilities"),fixture.getOrDefault("expected_legacy_capabilities",Map.of()),"legacy client capabilities");
-      } else if("mrtr_elicitation".equals(operation)){assertSubset(client.callTool("work",Map.of("value",1.0)),fixture.getOrDefault("expected_result",Map.of()),"MRTR elicitation result");if(elicitationParams.size()!=1)throw new AssertionError("MRTR elicitation handler count mismatch");assertSubset(elicitationParams.get(0),fixture.getOrDefault("expected_elicitation_params",Map.of()),"MRTR elicitation params");assertSubset(elicitationContexts.get(0),fixture.getOrDefault("expected_context",Map.of()),"MRTR elicitation context");List<Map<String,Object>> toolCalls=transport.requests.stream().filter(request->"tools/call".equals(request.get("method"))).toList();List<Object> expectedCalls=Core.asList(fixture.get("expected_call_params"));for(int i=0;i<expectedCalls.size();i++)assertSubset(Core.asMap(toolCalls.get(i).get("params")),expectedCalls.get(i),"MRTR elicitation call params "+i);Map<String,Object> meta=Core.asMap(Core.asMap(transport.requests.get(0).get("params")).get("_meta"));Map<String,Object> capabilities=Core.asMap(meta.get("io.modelcontextprotocol/clientCapabilities"));if(!capabilities.containsKey("elicitation")||capabilities.containsKey("sampling"))throw new AssertionError("dishonest MRTR capabilities: "+capabilities);AxMCPClient bad=new AxMCPClient(new AxMCPScriptedTransport(List.of()),Map.of("era","modern","sampling",true));try{bad.init();throw new AssertionError("truthy sampling option was accepted");}catch(AxMCPError error){if(!error.getMessage().contains("sampling is not supported"))throw error;}
+      } else if("mrtr_elicitation".equals(operation)){assertSubset(client.callTool("work",Map.of("value",1.0)),fixture.getOrDefault("expected_result",Map.of()),"MRTR elicitation result");if(elicitationParams.size()!=1)throw new AssertionError("MRTR elicitation handler count mismatch");assertSubset(elicitationParams.get(0),fixture.getOrDefault("expected_elicitation_params",Map.of()),"MRTR elicitation params");assertSubset(elicitationContexts.get(0),fixture.getOrDefault("expected_context",Map.of()),"MRTR elicitation context");List<Map<String,Object>> toolCalls=transport.requests.stream().filter(request->"tools/call".equals(request.get("method"))).toList();List<Object> expectedCalls=Core.asList(fixture.get("expected_call_params"));for(int i=0;i<expectedCalls.size();i++)assertSubset(Core.asMap(toolCalls.get(i).get("params")),expectedCalls.get(i),"MRTR elicitation call params "+i);Map<String,Object> meta=Core.asMap(Core.asMap(transport.requests.get(0).get("params")).get("_meta"));Map<String,Object> capabilities=Core.asMap(meta.get("io.modelcontextprotocol/clientCapabilities"));if(!capabilities.containsKey("elicitation")||capabilities.containsKey("sampling"))throw new AssertionError("dishonest MRTR capabilities: "+capabilities);AxMCPClient bad=new AxMCPClient(new AxMCPScriptedTransport(List.of()),Map.of("era","modern","sampling",true));try{bad.init();throw new AssertionError("a truthy sampling option is not a handler and must be rejected");}catch(AxMCPError error){if(!error.getMessage().contains("without a host handler function"))throw error;}
       } else if("mrtr_roots".equals(operation)){assertSubset(client.callTool("work",Map.of("value",1.0)),fixture.getOrDefault("expected_call_result",Map.of()),"MRTR tool result");assertSubset(client.getPrompt("ask",Map.of()),fixture.getOrDefault("expected_prompt_result",Map.of()),"MRTR prompt result");assertSubset(client.readResource("file:///resource"),fixture.getOrDefault("expected_resource_result",Map.of()),"MRTR resource result");List<String> methods=transport.requests.stream().map(request->String.valueOf(request.get("method"))).toList();if(!methods.equals(Core.asList(fixture.get("expected_methods")).stream().map(String::valueOf).toList()))throw new AssertionError("MRTR request methods mismatch: "+methods);List<Map<String,Object>> toolCalls=transport.requests.stream().filter(request->"tools/call".equals(request.get("method"))).toList();Set<String> ids=new LinkedHashSet<>();for(Map<String,Object> request:toolCalls)ids.add(String.valueOf(request.get("id")));if(ids.size()!=toolCalls.size())throw new AssertionError("MRTR rounds reused a request id");List<Object> expectedParams=Core.asList(fixture.get("expected_tool_call_params"));for(int i=0;i<expectedParams.size();i++){Map<String,Object> expected=Core.asMap(expectedParams.get(i));Map<String,Object> params=Core.asMap(toolCalls.get(i).get("params"));assertSubset(params,expected,"MRTR tool params "+i);if(!expected.containsKey("inputResponses")){if(params.containsKey("inputResponses")||params.containsKey("requestState"))throw new AssertionError("initial MRTR request included round state");}else if(!Core.asMap(params.get("inputResponses")).keySet().equals(Core.asMap(expected.get("inputResponses")).keySet()))throw new AssertionError("MRTR request retained stale input responses");if(!expected.containsKey("requestState")&&params.containsKey("requestState"))throw new AssertionError("MRTR request retained stale requestState");}
       } else if("subscriptions_listen".equals(operation)){for(Object raw:Core.asList(fixture.get("semantic_cases"))){Map<String,Object> item=Core.asMap(raw);Object actual=Core.mcp_listen_interests(item.getOrDefault("subscribed_uris",List.of()),item.getOrDefault("filters",Map.of()),item.get("task_ids"));if(!actual.equals(item.getOrDefault("expected",Map.of())))throw new AssertionError("listen interests mismatch: "+actual);}List<Map<String,Object>> delivered=new ArrayList<>();client.addNotificationListener(message->delivered.add(cloneMap(message)));client.startListening();if(transport.requestStreams.size()!=1)throw new AssertionError("initial subscriptions/listen stream missing");Map<String,Object> first=transport.requestStreams.get(0);assertSubset(Core.asMap(first.get("params")).get("notifications"),fixture.getOrDefault("expected_first_notifications",Map.of()),"initial listen interests");client.acquireResourceSubscription(String.valueOf(fixture.getOrDefault("uri","")),"fixture");if(transport.requestStreams.size()!=((Number)fixture.getOrDefault("expected_stream_count",0)).intValue())throw new AssertionError("subscription interest change did not restart request stream");Map<String,Object> second=transport.requestStreams.get(transport.requestStreams.size()-1);if(first.get("id").equals(second.get("id")))throw new AssertionError("subscriptions/listen restart reused its request id");assertSubset(Core.asMap(second.get("params")).get("notifications"),fixture.getOrDefault("expected_second_notifications",Map.of()),"updated listen interests");java.util.function.IntSupplier updateCount=()->(int)delivered.stream().filter(item->"notifications/resources/updated".equals(item.get("method"))).count();int before=updateCount.getAsInt();Map<String,Object> notification=cloneMap(Core.asMap(fixture.get("delivered_notification")));Map<String,Object> notificationParams=new LinkedHashMap<>(Core.asMap(notification.get("params")));Map<String,Object> meta=new LinkedHashMap<>(Map.of("io.modelcontextprotocol/subscriptionId","other"));notificationParams.put("_meta",meta);notification.put("params",notificationParams);transport.emit(notification);if(updateCount.getAsInt()!=before)throw new AssertionError("cross-subscription notification was delivered");meta.put("io.modelcontextprotocol/subscriptionId",second.get("id"));transport.emit(notification);if(updateCount.getAsInt()!=before+1)throw new AssertionError("active subscription notification was not delivered");Map<String,Object> last=delivered.get(delivered.size()-1);if(Core.asMap(last.get("params")).containsKey("_meta"))throw new AssertionError("subscription id leaked to notification consumer");for(Object forbidden:Core.asList(fixture.get("expected_forbidden_methods")))if(transport.requests.stream().anyMatch(request->String.valueOf(forbidden).equals(request.get("method"))))throw new AssertionError("modern subscription emitted legacy method "+forbidden);
       } else if("task_listen_restart".equals(operation)){List<Map<String,Object>> delivered=new ArrayList<>();client.addNotificationListener(message->delivered.add(cloneMap(message)));client.startListening();if(transport.requestStreams.size()!=1)throw new AssertionError("initial subscriptions/listen stream missing");if(Core.asMap(Core.asMap(transport.requestStreams.get(0).get("params")).get("notifications")).containsKey("taskIds"))throw new AssertionError("listener asked for tasks before any were recorded");Map<String,Object> outcome=client.callToolOutcome(String.valueOf(fixture.get("tool")),Core.asMap(fixture.getOrDefault("arguments",Map.of())));if(!"task".equals(outcome.get("kind")))throw new AssertionError("expected a task outcome, got "+outcome);if(transport.requestStreams.size()!=2)throw new AssertionError("a recorded task did not restart the listener");Map<String,Object> second=transport.requestStreams.get(transport.requestStreams.size()-1);assertSubset(Core.asMap(second.get("params")).get("notifications"),fixture.get("expected_second_notifications"),"task listen interests");Map<String,Object> notification=cloneMap(Core.asMap(fixture.get("task_notification")));Map<String,Object> notificationParams=new LinkedHashMap<>(Core.asMap(notification.get("params")));notificationParams.put("_meta",new LinkedHashMap<>(Map.of("io.modelcontextprotocol/subscriptionId",second.get("id"))));notification.put("params",notificationParams);transport.emit(notification);if(delivered.stream().filter(item->"notifications/tasks".equals(item.get("method"))).count()!=1)throw new AssertionError("task notification was not delivered");if(transport.requestStreams.size()!=2)throw new AssertionError("a known task restarted the listener");
@@ -719,6 +884,42 @@ Map<String,String> headers=toolHeaders(name,args);Map<String,Object> result;try{
   }
 
   @SuppressWarnings("unchecked")
+  /**
+   * Exact equality, for the fixtures that pin a whole response rather than a
+   * subset of it. An App response that grew a field would pass a subset
+   * check and fail this one, which is the point.
+   */
+  static void assertEqual(Object actual, Object expected, String label) {
+    if (!deepEquals(actual, expected)) {
+      throw new AssertionError(label + " mismatch:\n  actual:   " + actual + "\n  expected: " + expected);
+    }
+  }
+
+  /**
+   * Structural equality in both directions, comparing numbers by value so a
+   * fixture's 1 matches a decoded 1.0. Unlike assertSubset this fails when
+   * the actual value carries a key the expectation does not.
+   */
+  static boolean deepEquals(Object actual, Object expected) {
+    if (actual instanceof Number left && expected instanceof Number right) {
+      return Double.compare(left.doubleValue(), right.doubleValue()) == 0;
+    }
+    if (expected instanceof Map<?, ?> right) {
+      if (!(actual instanceof Map<?, ?> left) || left.size() != right.size()) return false;
+      for (Map.Entry<?, ?> entry : right.entrySet()) {
+        if (!left.containsKey(entry.getKey())) return false;
+        if (!deepEquals(left.get(entry.getKey()), entry.getValue())) return false;
+      }
+      return true;
+    }
+    if (expected instanceof List<?> right) {
+      if (!(actual instanceof List<?> left) || left.size() != right.size()) return false;
+      for (int i = 0; i < right.size(); i++) if (!deepEquals(left.get(i), right.get(i))) return false;
+      return true;
+    }
+    return java.util.Objects.equals(actual, expected);
+  }
+
   static void assertSubset(Object actual, Object expected, String label) {
     if (expected instanceof Map<?, ?> expectedMap) {
       if (!(actual instanceof Map<?, ?> actualMap)) throw new AssertionError(label + ": expected object");

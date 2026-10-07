@@ -34,13 +34,19 @@ anchor would also accept a trailing newline, which is not a valid name."
 (defparameter +primitive-json-types+ '("string" "number" "integer" "boolean" "null"))
 
 (defun supported-schema-keywords (type)
-  "The schema keywords this subset implements *for TYPE*.  Keywords are
-type-specific on purpose: \"items\" on a string or \"properties\" on an array
-would advertise a constraint that is never checked."
-  (append '("type" "title" "description")
-          (when (member type +primitive-json-types+ :test #'equal) '("enum"))
-          (when (equal type "object") '("properties" "required" "additionalProperties"))
-          (when (equal type "array") '("items"))))
+  "The schema keywords this port enforces *for TYPE*.
+
+Keywords stay type-specific on purpose: \"items\" on a string, or \"properties\"
+on an array, would advertise a constraint that is never checked.  Everything
+listed here is enforced by Core's argument validator, which is the same code the
+reference runs, so this list says what is checked rather than what was easy."
+  (append '("type" "title" "description" "enum" "const" "default" "examples")
+          (when (member type '("number" "integer") :test #'equal)
+            '("minimum" "maximum" "exclusiveMinimum" "exclusiveMaximum" "multipleOf"))
+          (when (equal type "string") '("minLength" "maxLength" "pattern" "format"))
+          (when (equal type "object")
+            '("properties" "required" "additionalProperties" "minProperties" "maxProperties"))
+          (when (equal type "array") '("items" "minItems" "maxItems" "uniqueItems"))))
 
 ;;; ------------------------------------------------------------------
 ;;; tool factory
@@ -195,14 +201,20 @@ this validator fails closed."
                          (push (format nil "~a: \"required\" names undeclared property \"~a\"."
                                        context name)
                                problems))))))
+            ;; A boolean says whether extra properties are allowed; an object is
+            ;; the schema every extra property must match, and Core checks it.
             (unless (or (null additional)
                         (json-true-p additional)
-                        (json-false-p additional))
-              ;; A schema-valued additionalProperties would describe extra
-              ;; properties we do not check, so it is rejected.
-              (push (format nil "~a: \"additionalProperties\" must be a JSON boolean; ~
-a schema value is not supported." context)
-                    problems))))
+                        (json-false-p additional)
+                        (hash-table-p additional))
+              (push (format nil "~a: \"additionalProperties\" must be a JSON boolean ~
+or a schema object." context)
+                    problems))
+            (when (hash-table-p additional)
+              (setf problems
+                    (append (%validate-schema-node
+                             additional (format nil "~a additionalProperties" context))
+                            problems)))))
         (when (equal type "array")
           (let ((items (%present (jget schema "items"))))
             (if (null items)
@@ -305,20 +317,100 @@ enforce.  An empty list means every keyword present is implemented."
     (nreverse problems)))
 
 (defun validate-tool-arguments (spec arguments)
-  "Validate ARGUMENTS (a hash table with string keys) against SPEC's JSON
-Schema.  Returns a list of human-readable problems; an empty list means the
-arguments are safe to pass to the handler."
+  "Validate ARGUMENTS against SPEC's JSON Schema.
+
+Returns a list of human-readable problems; an empty list means the arguments are
+safe to pass to the handler.
+
+The checking itself is Core's, so this port agrees with the reference on every
+edge the hand-written version got wrong: an integer is a number with an integral
+value, so 1.0 is accepted; a non-finite number is rejected before a handler can
+see it; enum membership compares values rather than Lisp objects, so 1 matches
+1.0; and an extra property is allowed unless the schema says
+\"additionalProperties\": false, which is what JSON Schema means."
   (let* ((name (jget spec "name"))
          (schema (%present (jget spec "parameters")))
          (context (format nil "Tool '~a'" name)))
     (cond
       ((not (hash-table-p arguments))
        (list (format nil "~a arguments must be a JSON object." context)))
+      ((null schema) '())
       (t
-       (let ((unsupported (validate-schema-support schema context)))
-         (if unsupported
-             unsupported
-             (%validate-object schema arguments context)))))))
+       (let ((errors (axllm/core::chat-session-tool-argument-errors schema arguments))
+             (problems '()))
+         (map nil
+              (lambda (entry)
+                (let ((field (%present (jget entry "field")))
+                      (message (or (%present (jget entry "message")) "is invalid")))
+                  (push (if (and field (not (%blankp field)))
+                            (format nil "~a argument \"~a\": ~a." context field message)
+                            (format nil "~a: ~a." context message))
+                        problems)))
+              (if (and (vectorp errors) (not (stringp errors)))
+                  errors
+                  (coerce (or errors '()) 'vector)))
+         (nreverse problems))))))
+
+;;; ------------------------------------------------------------------
+;;; Result text for the model
+;;; ------------------------------------------------------------------
+
+(defun %write-json-indented (value stream depth)
+  "Write VALUE as JSON with two-space indentation, matching the Core
+function-result formatter's `JSON.stringify(value, null, 2)'."
+  (flet ((pad (level) (dotimes (i (* 2 level)) (write-char #\Space stream))))
+    (cond
+      ((%object-p value)
+       (let ((keys (%object-keys value)))
+         (if (null keys)
+             (write-string "{}" stream)
+             (progn
+               (write-string "{" stream)
+               (loop for key in keys
+                     for first = t then nil
+                     do (unless first (write-string "," stream))
+                        (terpri stream)
+                        (pad (1+ depth))
+                        (%write-json-string key stream)
+                        (write-string ": " stream)
+                        (%write-json-indented (gethash key value) stream (1+ depth)))
+               (terpri stream)
+               (pad depth)
+               (write-string "}" stream)))))
+      ((%json-array-p value)
+       (if (zerop (length value))
+           (write-string "[]" stream)
+           (progn
+             (write-string "[" stream)
+             (loop for item across value
+                   for first = t then nil
+                   do (unless first (write-string "," stream))
+                      (terpri stream)
+                      (pad (1+ depth))
+                      (%write-json-indented item stream (1+ depth)))
+             (terpri stream)
+             (pad depth)
+             (write-string "]" stream))))
+      (t (%write-json value stream)))))
+
+(defun encode-json-pretty (value)
+  "VALUE as JSON text indented with two spaces, key order preserved.
+
+This is the shape Core writes tool results in, so a model reading a result
+object sees the same text in every Ax port."
+  (with-output-to-string (stream) (%write-json-indented value stream 0)))
+
+(defun tool-result-text (result)
+  "RESULT as the text the model sees for a tool call.
+
+A string passes through unchanged, a missing value renders as nothing, and any
+other JSON value is pretty-printed.  A result that renders as nothing is
+reported as \"done\": a tool that ran and returned no value succeeded, and
+saying so is not the same as telling the model the result was null."
+  (let ((text (cond ((stringp result) result)
+                    ((or (null result) (eq result :null)) "")
+                    (t (encode-json-pretty result)))))
+    (if (string= text "") "done" text)))
 
 (defun invoke-tool (spec arguments)
   "Validate ARGUMENTS and invoke SPEC's handler.  Returns (values result-string
@@ -326,8 +418,120 @@ problems).  When PROBLEMS is non-nil the handler was NOT invoked."
   (let ((problems (validate-tool-arguments spec arguments)))
     (if problems
         (values nil problems)
-        (let ((result (funcall (tool-handler spec) arguments)))
-          (values (cond ((stringp result) result)
-                        ((null result) "")
-                        (t (encode-json result)))
-                  nil)))))
+        (values (tool-result-text (funcall (tool-handler spec) arguments)) nil))))
+
+;;; ------------------------------------------------------------------
+;;; Function processor
+;;; ------------------------------------------------------------------
+;;;
+;;; One place that turns a model's tool call into a result.  A caller that
+;;; wants the raw value as well as the text the model sees asks for details;
+;;; a caller that only needs the text calls `execute-function'.
+;;;
+;;; Every failure here is recoverable: a `function-call-error' carries text the
+;;; model can act on, so a wrong name or a failing backend becomes another turn
+;;; rather than the end of the run.
+
+(define-condition function-call-error (tool-error) ()
+  (:documentation
+   "A tool call that could not be completed, with text the model can correct
+from.  Distinct from `tool-error': a definition mistake is the programmer's, a
+`function-call-error' is the model's or the backend's."))
+
+(defun %function-call-fail (format-control &rest arguments)
+  (error 'function-call-error :message (apply #'format nil format-control arguments)))
+
+(defclass function-processor ()
+  ((functions :initarg :functions :reader function-processor-functions)
+   (index :initarg :index :reader function-processor-index)
+   (normalized :initarg :normalized :reader %function-processor-normalized)))
+
+(defun %normalized-function-name (name)
+  "NAME with every non-alphanumeric character dropped, lowercased."
+  (let ((out (make-string-output-stream)))
+    (when (stringp name)
+      (loop for char across name
+            do (when (alphanumericp char) (write-char (char-downcase char) out))))
+    (get-output-stream-string out)))
+
+(defun make-function-processor (tools)
+  "A processor over TOOLS (a list or vector of specs from `tool')."
+  (let* ((list (coerce (if (listp tools) tools (coerce tools 'list)) 'list))
+         (index (tool-index list))
+         (normalized (make-hash-table :test #'equal)))
+    ;; A normalized name that two tools share is ambiguous, so it resolves
+    ;; nothing rather than picking one of them.
+    (dolist (spec list)
+      (let ((key (%normalized-function-name (jget spec "name"))))
+        (setf (gethash key normalized)
+              (if (nth-value 1 (gethash key normalized)) :ambiguous spec))))
+    (make-instance 'function-processor :functions list :index index :normalized normalized)))
+
+(defun function-processor-resolve (processor name)
+  "PROCESSOR's spec for NAME: an exact match first, then a normalized one.
+
+Exact before normalized matters when a tool is called `get_weather' and another
+`getWeather': the name the model wrote wins over the one that merely folds to
+the same letters."
+  (or (and (stringp name) (gethash name (function-processor-index processor)))
+      (let ((hit (gethash (%normalized-function-name name)
+                          (%function-processor-normalized processor))))
+        (and hit (not (eq hit :ambiguous)) hit))))
+
+(defun %function-call-arguments (call)
+  "CALL's arguments as a parsed JSON value.
+
+A string is parsed; an object the provider already decoded is used as it is.
+An absent value is an empty object: a tool with no parameters is called with
+no arguments, not refused."
+  (let* ((nested (%present (jget call "function")))
+         (raw (or (%present (jget (or nested call) "params"))
+                  (%present (jget call "arguments"))
+                  (%present (jget call "args")))))
+    (cond ((null raw) (object))
+          ((stringp raw)
+           (if (zerop (length raw))
+               (object)
+               (handler-case (parse-json raw)
+                 (error () (%function-call-fail "Invalid function arguments: ~a" raw)))))
+          (t raw))))
+
+(defun execute-function-with-details (processor call)
+  "Run CALL against PROCESSOR.  Returns (values formatted raw-result parsed-args).
+
+FORMATTED is the text the model sees, RAW-RESULT the handler's own value, and
+PARSED-ARGS the arguments as the handler received them."
+  (unless (hash-table-p call)
+    (%function-call-fail "A function call must be an object."))
+  (let* ((name (%present (jget call "name")))
+         (spec (function-processor-resolve processor name)))
+    (unless spec
+      (let ((available (%string-join ", " (mapcar (lambda (s) (jget s "name"))
+                                                  (function-processor-functions processor)))))
+        (%function-call-fail "Function not found: ~a. Available functions: ~a. ~
+Call one of these exact function names."
+                             name (if (string= available "") "(none)" available))))
+    (unless (functionp (tool-handler spec))
+      (%function-call-fail "No handler for function: ~a" name))
+    (let ((arguments (%function-call-arguments call)))
+      (let ((problems (validate-tool-arguments spec arguments)))
+        (when problems (%function-call-fail "~a" (%string-join " " problems))))
+      (let ((raw (handler-case (funcall (tool-handler spec) arguments)
+                   (function-call-error (condition) (error condition))
+                   (error (condition)
+                     ;; A handler that failed is reported to the model, not to
+                     ;; the caller: a backend outage is something the model can
+                     ;; work around, and the run keeps its earlier results.
+                     (%function-call-fail "~a" (ax-error-message-text condition))))))
+        (values (tool-result-text raw) raw arguments)))))
+
+(defun execute-function (processor call)
+  "The text PROCESSOR produces for CALL."
+  (values (execute-function-with-details processor call)))
+
+(defun ax-error-message-text (condition)
+  "CONDITION's message as one line, with no Lisp type noise around it."
+  (let ((text (if (typep condition 'ax-error)
+                  (ax-error-message condition)
+                  (princ-to-string condition))))
+    (substitute #\Space #\Newline (or text ""))))

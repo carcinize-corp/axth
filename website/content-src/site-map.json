@@ -1,6 +1,6 @@
 {
   "defaultLanguage": "typescript",
-  "languages": ["typescript", "python", "java", "cpp", "go", "rust"],
+  "languages": ["typescript", "python", "java", "cpp", "go", "rust", "lisp"],
   "redirects": [
     {
       "from": "concepts/agents",

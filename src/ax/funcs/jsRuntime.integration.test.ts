@@ -3,6 +3,30 @@ import { describe, expect, it } from 'vitest';
 import { AxJSRuntime, AxJSRuntimePermission } from './jsRuntime.js';
 
 describe('AxJSRuntime integration', () => {
+  it('settles a trailing host call without requiring an await token', async () => {
+    const runtime = new AxJSRuntime({ outputMode: 'return' });
+    const session = runtime.createSession({
+      final: (answer: unknown) => ({ type: 'final', answer }),
+      fail: async () => {
+        throw new Error('host rejected');
+      },
+    });
+    try {
+      await expect(session.execute('final({answer:42})')).resolves.toEqual({
+        type: 'final',
+        answer: { answer: 42 },
+      });
+      await expect(session.execute('Promise.resolve(17)')).resolves.toBe(17);
+      await expect(session.execute('fail()')).rejects.toThrow('host rejected');
+      await expect(session.execute('final("recovered")')).resolves.toEqual({
+        type: 'final',
+        answer: 'recovered',
+      });
+    } finally {
+      session.close();
+    }
+  });
+
   it('returns persisted value from a standalone sync return snippet', async () => {
     const runtime = new AxJSRuntime();
     const session = runtime.createSession();

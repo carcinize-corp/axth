@@ -1,0 +1,40 @@
+{
+  "axir_version": "0.1",
+  "target": "lisp",
+  "package_name": "axllm",
+  "supported_suites": [
+    "axagent",
+    "axai",
+    "axevent",
+    "axflow",
+    "axgen",
+    "axmcp",
+    "axoptimize",
+    "axprogram",
+    "prompt",
+    "schema",
+    "signature",
+    "validation"
+  ],
+  "provider_mode": "provider-descriptor-registry-openai-compatible-openai-responses-google-gemini-anthropic",
+  "scripted_transport_support": true,
+  "real_network_support": false,
+  "runtime_profiles": [
+    {
+      "id": "javascript-process",
+      "actor_language": "JavaScript",
+      "support_mode": "process",
+      "dependency_mode": "external",
+      "verification_command": "axir verify --targets lisp"
+    }
+  ],
+  "core_owned_feature_groups": [],
+  "public_symbols": [],
+  "target_idiom": {
+    "moduleNaming": "packages-and-asdf-systems",
+    "methodNaming": "lisp-case",
+    "asyncPolicy": "sync-first",
+    "collectionPolicy": "hash-table-vector-at-dynamic-boundaries",
+    "errorPolicy": "condition-hierarchy-boundary"
+  }
+}

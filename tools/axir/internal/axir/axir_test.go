@@ -1202,7 +1202,7 @@ func TestCapabilityManifestsAndGeneratedPackageShape(t *testing.T) {
 					t.Fatalf("%s conformance coverage missing kind %q: %#v", tc.target, want, coverage.Suites)
 				}
 			}
-			for _, want := range []string{"server_requests_legacy", "tasks_v2_input_required"} {
+			for _, want := range []string{"server_requests_legacy", "server_requests_sampling", "app_bridge", "tasks_v2_input_required"} {
 				if !conformanceCoverageContainsOperation(coverage, "axmcp", want) {
 					t.Fatalf("%s conformance coverage missing AxMCP operation %q: %#v", tc.target, want, coverage.Suites)
 				}
@@ -3343,10 +3343,10 @@ class Scripted(AxBaseAI):
     def _chat(self, request, options):
         self.calls += 1
         if self.calls == 1:
-            return {'results': [{'index': 0, 'content': '', 'function_calls': [{'id': 'c1', 'function': {'name': 'search', 'params': {'query': 'q'}}}]}]}
+            return {'results': [{'index': 0, 'content': '', 'function_calls': [{'id': 'c1', 'type': 'function', 'function': {'name': 'search', 'params': {'query': 'q'}}}]}]}
         if self.calls == 2:
-            return {'results': [{'index': 0, 'content': '{}'}]}
-        return {'results': [{'index': 0, 'content': '{"answer": "done"}'}]}
+            return {'results': [{'index': 0, 'content': 'Answer: unfinished\nCount: invalid'}]}
+        return {'results': [{'index': 0, 'content': 'Answer: done\nCount: 1'}]}
     def _embed(self, request, options):
         return {'embeddings': [[0.0]], 'model_usage': {'ai': 'scripted'}}
     def transcribe(self, request, options=None):
@@ -3354,9 +3354,11 @@ class Scripted(AxBaseAI):
     def speak(self, request, options=None):
         return {'audio': 'scripted-audio'}
 
-gen = ax('query:string -> answer:string', {'functions': [search], 'validation_retries': 2})
-out = gen.forward(Scripted(), {'query': 'q'})
-assert out == {'answer': 'done'}, out
+gen = ax('query:string -> answer:string, count:number', {'functions': [search], 'validation_retries': 2})
+scripted = Scripted()
+out = gen.forward(scripted, {'query': 'q'})
+assert out == {'answer': 'done', 'count': 1}, out
+assert scripted.calls == 3, scripted.calls
 
 class AgentScripted(AxBaseAI):
     def __init__(self):
@@ -3364,11 +3366,7 @@ class AgentScripted(AxBaseAI):
         self.calls = 0
     def _chat(self, request, options):
         self.calls += 1
-        if self.calls == 1:
-            return {'results': [{'index': 0, 'content': '{"completion":{"type":"final","args":["Answer",{}]}}'}]}
-        if self.calls == 2:
-            return {'results': [{'index': 0, 'content': '{"completion":{"type":"final","args":["Answer",{"answer":"done"}]}}'}]}
-        return {'results': [{'index': 0, 'content': '{"answer": "done"}'}]}
+        raise AssertionError('an agent without a runtime must not call the model')
     def _embed(self, request, options):
         return {'embeddings': [[0.0]], 'model_usage': {'ai': 'agent-scripted'}}
     def transcribe(self, request, options=None):
@@ -3377,9 +3375,14 @@ class AgentScripted(AxBaseAI):
         return {'audio': 'scripted-audio'}
 
 ag = agent('question:string -> answer:string', {'contextFields': []})
-agent_out = ag.forward(AgentScripted(), {'question': 'q'})
-assert agent_out == {'answer': 'done'}, agent_out
-assert len(ag.get_chat_log()) == 3
+agent_client = AgentScripted()
+try:
+    ag.forward(agent_client, {'question': 'q'})
+except Exception as error:
+    assert 'requires an executable AxCodeRuntime before forward' in str(error), error
+else:
+    raise AssertionError('agent accepted a missing runtime')
+assert agent_client.calls == 0, agent_client.calls
 
 service = ai('openai', api_key='test', transport=lambda req: {
     'status': 200,
@@ -3664,6 +3667,57 @@ func TestPythonPromptConformanceFixtures(t *testing.T) {
 	}
 }
 
+func TestPythonFlowMermaidHarnessRejectsFalseGreens(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	bundle, err := LoadBundle(rootPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := Compile(bundle, "python", dir); err != nil {
+		t.Fatal(err)
+	}
+	// This fixture's first render differs from its canonical rerender. Using
+	// the latter for both assertions previously hid a shared Core ordering bug.
+	fixture := filepath.Join(repoRootPath(), "ir", "conformance", "axflow", "mermaid-class-branch-join.json")
+	script := `
+import copy, json, sys
+from axllm.conformance import _run_flow_mermaid
+with open(sys.argv[1]) as stream:
+    fixture = json.load(stream)
+assert fixture["expected_rendered"] != fixture["expected_rerendered"]
+_run_flow_mermaid(fixture)
+for field, value in (("expected_rendered", "impossible first render"),
+                     ("expected_rerendered", "impossible second render"),
+                     ("expected_direction", "INVALID"),
+                     ("operation", "unknown-operation")):
+    changed = copy.deepcopy(fixture)
+    changed[field] = value
+    try:
+        _run_flow_mermaid(changed)
+    except Exception:
+        pass
+    else:
+        raise AssertionError(f"ignored {field}")
+changed = copy.deepcopy(fixture)
+del changed["expected_rendered"]
+try:
+    _run_flow_mermaid(changed)
+except Exception:
+    pass
+else:
+    raise AssertionError("accepted a missing first-render expectation")
+print("mermaid harness: baseline and five negative checks passed")
+`
+	cmd := exec.Command("python3", "-c", script, fixture)
+	cmd.Env = fixtureEnv(dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("mermaid harness regression: %v\n%s", err, out)
+	}
+}
+
 func TestPythonAxGenConformanceFixtures(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available")
@@ -3786,6 +3840,106 @@ func TestPythonSignatureSchemaValidationConformanceFixtures(t *testing.T) {
 		if !strings.Contains(string(out), tc.want) {
 			t.Fatalf("unexpected %s conformance output: %s", tc.name, out)
 		}
+	}
+}
+
+func TestPythonMCPHostCallbacks(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	bundle, err := LoadBundle(rootPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := Compile(bundle, "python", dir); err != nil {
+		t.Fatal(err)
+	}
+	fixtures, err := filepath.Abs(filepath.Join(filepath.Dir(rootPath()), "..", "conformance", "axmcp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(python, "-c", `
+import json, pathlib, sys
+from axllm import AxMCPAppBridge, AxMCPClient, AxMCPScriptedTransport
+from axllm.mcp import AxMCPError, run_mcp_conformance_fixture
+
+root = pathlib.Path(sys.argv[1])
+for name in ("app-bridge", "server-requests-sampling"):
+    run_mcp_conformance_fixture(json.loads((root / (name + ".json")).read_text()))
+
+# The same sampling callback must work for both modern fulfillment paths,
+# not only legacy inbound messages. No elicitation callback is installed.
+for name in ("mrtr-elicitation", "tasks-v2-input-required"):
+    fixture = json.loads((root / (name + ".json")).read_text())
+    calls = []
+    def sample(params, context):
+        calls.append((params, context))
+        return {"role": "assistant", "content": {"type": "text", "text": "sampled"}}
+    for response in fixture["responses"]:
+        pending = response["result"].get("inputRequests", {}).get("confirmation")
+        if pending is not None:
+            pending.update(method="sampling/createMessage", params={"messages": [], "maxTokens": 23})
+    transport = AxMCPScriptedTransport(fixture["responses"])
+    client = AxMCPClient(transport, {**fixture["client_options"], "sampling": sample})
+    client.init()
+    result = client.call_tool("slow" if name.startswith("tasks") else "work", {})
+    assert result["structuredContent"] == {"done": True}, result
+    assert len(calls) == 1, calls
+    assert calls[0][0] == {"messages": [], "maxTokens": 23}, calls
+    assert calls[0][1]["client"] is client and calls[0][1]["namespace"] == "fixture"
+    capabilities = transport.requests[0]["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
+    assert capabilities["sampling"] == {"context": {}, "tools": {}}, capabilities
+    assert "elicitation" not in capabilities, capabilities
+    request = next(r for r in transport.requests if "inputResponses" in r.get("params", {}))
+    assert request["params"]["inputResponses"]["confirmation"] == {
+        "role": "assistant", "content": {"type": "text", "text": "sampled"}}, request
+
+def fail(_params, _context=None):
+    raise RuntimeError("host callback failed")
+
+fixture = json.loads((root / "server-requests-sampling.json").read_text())
+transport = AxMCPScriptedTransport(fixture["responses"])
+client = AxMCPClient(transport, {**fixture["client_options"], "sampling": fail})
+client.init()
+transport.emit(fixture["server_requests"][0])
+assert transport.sent_responses == [{"jsonrpc": "2.0", "id": "sampling-1",
+    "error": {"code": -32603, "message": "host callback failed"}}], transport.sent_responses
+
+fixture = json.loads((root / "app-bridge.json").read_text())
+transport = AxMCPScriptedTransport(fixture["responses"])
+client = AxMCPClient(transport, fixture["client_options"])
+client.init()
+messages = []
+bridge = AxMCPAppBridge(client, "picker", {"openLink": fail, "log": fail,
+    "sendMessage": messages.append, "requestDisplayMode": lambda _: "cinema"})
+bridge.handle_view_message({"method": "ui/notifications/initialized"})
+result = bridge.handle_view_message({"id": 7, "method": "ui/open-link", "params": {"url": "https://example.com"}})
+assert result == {"jsonrpc": "2.0", "id": 7, "error": {"code": -32000, "message": "host callback failed"}}, result
+try:
+    bridge.handle_view_message({"method": "notifications/message", "params": {"data": "hello"}})
+except RuntimeError as error:
+    assert str(error) == "host callback failed"
+else:
+    raise AssertionError("notification callback failure was swallowed")
+result = bridge.handle_view_message({"id": 8, "method": "ui/message", "params": {"text": "hello"}})
+assert result == {"jsonrpc": "2.0", "id": 8, "result": {}} and messages == [{"text": "hello"}]
+result = bridge.handle_view_message({"id": 9, "method": "ui/request-display-mode", "params": {"mode": "pip"}})
+assert result["error"]["message"] == "Invalid MCP App display mode granted by host", result
+transport.responses.append({"method": "resources/read", "result": {"contents": [
+    {"uri": "ui://shop/picker", "mimeType": "text/html;profile=mcp-app", "blob": "invalid!"}]}})
+try:
+    bridge.load_resource()
+except AxMCPError as error:
+    assert "not valid base64 HTML" in str(error), str(error)
+else:
+    raise AssertionError("invalid App blob accepted")
+print("MCP host callbacks PASS")
+`, fixtures)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("Python MCP host callbacks failed: %v\n%s", err, out)
 	}
 }
 
@@ -4421,7 +4575,7 @@ import java.util.*;
 public class Smoke {
   static final class Scripted implements AiClient {
     public Map<String, Object> complete(Map<String, Object> request) {
-      return Map.of("content", "{\"answer\":\"Paris\"}");
+      return Map.of("content", "Answer: Paris");
     }
   }
   public static void main(String[] args) throws Exception {
@@ -4433,14 +4587,18 @@ public class Smoke {
       int calls = 0;
       public Map<String, Object> complete(Map<String, Object> request) {
         calls++;
-        if (calls == 1) return Map.of("content", "{\"completion\":{\"type\":\"final\",\"args\":[\"Answer\",{}]}}");
-        if (calls == 2) return Map.of("content", "{\"completion\":{\"type\":\"final\",\"args\":[\"Answer\",{\"answer\":\"Paris\"}]}}");
-        return Map.of("content", "{\"answer\":\"Paris\"}");
+        throw new AssertionError("an agent without a runtime must not call the model");
       }
     }
     AxAgent agent = Ax.agent("question:string -> answer:string", Map.of("contextFields", List.of()));
-    Map<String, Object> agentOut = agent.forward(new AgentScripted(), Map.of("question", "Capital?"));
-    if (!"Paris".equals(agentOut.get("answer"))) throw new RuntimeException("bad agent output: " + agentOut);
+    AgentScripted agentClient = new AgentScripted();
+    try {
+      agent.forward(agentClient, Map.of("question", "Capital?"));
+      throw new AssertionError("agent accepted a missing runtime");
+    } catch (RuntimeException error) {
+      if (!error.getMessage().contains("requires an executable AxCodeRuntime before forward")) throw error;
+    }
+    if (agentClient.calls != 0) throw new AssertionError("agent called the model without a runtime");
     System.out.println("java-ok");
   }
 }
@@ -4667,7 +4825,7 @@ int main() {
   if (!axllm::Core::truthy(messages) || !axllm::Core::truthy(schema)) return 1;
   struct ScriptedClient : axllm::AIClient {
     axllm::Value complete(axllm::Value) override {
-      return axllm::object({{"content", "{\"answer\":\"Paris\"}"}});
+      return axllm::object({{"content", "Answer: Paris"}});
     }
   } client;
   auto qa = axllm::ax("question:string -> answer:string");
@@ -4677,15 +4835,18 @@ int main() {
     int calls = 0;
     axllm::Value complete(axllm::Value) override {
       ++calls;
-      if (calls == 1) return axllm::object({{"content", "{\"completion\":{\"type\":\"final\",\"args\":[\"Answer\",{}]}}"}});
-      if (calls == 2) return axllm::object({{"content", "{\"completion\":{\"type\":\"final\",\"args\":[\"Answer\",{\"answer\":\"Paris\"}]}}"}});
-      return axllm::object({{"content", "{\"answer\":\"Paris\"}"}});
+      throw std::runtime_error("an agent without a runtime must not call the model");
     }
   } agent_client;
   auto ag = axllm::agent("question:string -> answer:string", axllm::object({{"contextFields", axllm::array({})}}));
-  axllm::Value agent_out = ag.forward(agent_client, axllm::object({{"question", "Capital?"}}));
-  if (!axllm::equal(axllm::Core::get(agent_out, "answer"), "Paris")) return 3;
-  auto service = axllm::ai("openai", axllm::object({{"model", "gpt-4.1-mini"}, {"api_key", "test-key"}}));
+  try {
+    ag.forward(agent_client, axllm::object({{"question", "Capital?"}}));
+    return 3;
+  } catch (const std::exception& error) {
+    if (std::string(error.what()).find("requires an executable AxCodeRuntime before forward") == std::string::npos) throw;
+  }
+  if (agent_client.calls != 0) return 4;
+  auto service = axllm::ai("openai", axllm::object({{"model", "gpt-5.4-mini"}, {"api_key", "test-key"}}));
   (void)service;
   std::cout << "cpp-ok\n";
 }

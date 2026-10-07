@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,12 +10,39 @@ import { fileURLToPath } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const siteRoot = path.join(repoRoot, 'website');
+// Exercise the repository subpath used by GitHub Pages, not only a root site.
+const checkBaseURL = 'https://website-check.invalid/axth/';
+const checkBasePath = new URL(checkBaseURL).pathname;
+
+// The site map is the single list of language routes. Deriving from it means a
+// new language is checked the moment it is generated, instead of silently
+// skipping every route check here.
+const siteLanguages = JSON.parse(
+  readFileSync(path.join(siteRoot, 'content-src', 'site-map.json'), 'utf8')
+).languages;
+const languageRoute = `(?:${siteLanguages.join('|')})`;
+const academyPagesPerLanguage = 71;
+
+// Route shapes, compiled once against the site map's language list.
+function languagePattern(suffix) {
+  return new RegExp(`^${languageRoute}/${suffix}`);
+}
+
+const academyReviewPage = languagePattern('academy/review/index\\.html$');
+const academyDashboardPage = languagePattern('academy/index\\.html$');
+const academyPage = languagePattern('academy(?:/.*)?/index\\.html$');
+const curatedApiPage = languagePattern(
+  'api/(?:ai|ax|s|agent|flow|optimize)/index\\.html$'
+);
+const apiPage = languagePattern('api/');
+const tocExpectedPage = languagePattern(
+  '(?:quick-start|how-ax-fits-together|advanced-start|faq|examples(?:/[^/]+)?|concepts/[^/]+|subsystems/[^/]+)/index\\.html$'
+);
+const mermaidExpectedPage = languagePattern(
+  '(?:quick-start|how-ax-fits-together|agents(?:/(?:standard|long-horizon|internals))?|concepts/(?:dspy|signatures|tools|llms|mcp|optimization|telemetry)|subsystems/(?:ai|ax|s|flow|optimize))/index\\.html$'
+);
+const languageDocsPage = languagePattern('.+/index\\.html$');
 const destination = await mkdtemp(path.join(tmpdir(), 'website-public-'));
-// The site is deployed under a repository subpath on GitHub Pages, so the check
-// builds against a subpath base URL and resolves the canonified links back to
-// the published tree.
-const checkBaseURL = 'https://links.test/axth/';
-const checkBasePrefix = checkBaseURL.replace(/\/$/, '');
 
 try {
   run('npm', ['run', 'doc:build:markdown']);
@@ -22,10 +50,10 @@ try {
   run('hugo', [
     '--source',
     siteRoot,
-    '--baseURL',
-    checkBaseURL,
     '--environment',
     'production',
+    '--baseURL',
+    checkBaseURL,
     '--destination',
     destination,
     '--cleanDestinationDir',
@@ -65,18 +93,18 @@ try {
     path.join(destination, 'js', 'mermaid-init.js'),
     'utf8'
   );
-  // Hugo rewrites root-leading links in markup against baseURL, but static
-  // scripts are published verbatim, so a hardcoded "/asset" bypasses the
-  // deployed subpath.
+  // Static scripts are published verbatim: root-leading URLs bypass baseURL.
+  const hardcodedRoute = new RegExp(
+    `['"\x60]\\/(?:js|css|svg|pagefind|vendor|research|${siteLanguages.join('|')})\\/`,
+    'g'
+  );
   for (const [name, source] of [
     ['js/site.js', js],
     ['js/academy.js', academyJs],
     ['js/academy-engine.js', academyEngine],
     ['js/mermaid-init.js', mermaidInit],
   ]) {
-    const hardcoded = source.match(
-      /['"`]\/(?:js|css|svg|pagefind|vendor|typescript|python|java|cpp|go|rust|research)\//g
-    );
+    const hardcoded = source.match(hardcodedRoute);
     if (hardcoded) {
       qualityFailures.push(
         `${name}: site paths must resolve against data-base-path, found ${[...new Set(hardcoded)].join(', ')}`
@@ -383,6 +411,21 @@ try {
   await collectSVGTextClutterFailures(qualityFailures);
 
   const academyHtmlFiles = [];
+  const pageIDs = new Map();
+  async function idsFor(file) {
+    if (!pageIDs.has(file)) {
+      const html = await readFile(file, 'utf8');
+      pageIDs.set(
+        file,
+        new Set(
+          [...html.matchAll(/<[a-z][^>]*>/gi)]
+            .map(([tag]) => attrValue(tag, 'id'))
+            .filter(Boolean)
+        )
+      );
+    }
+    return pageIDs.get(file);
+  }
   for (const file of htmlFiles) {
     const html = await readFile(file, 'utf8');
     const rel = path.relative(destination, file).replaceAll(path.sep, '/');
@@ -392,15 +435,8 @@ try {
       for (const [tag] of html.matchAll(/<a\b[^>]*>/gi)) {
         const route = attrValue(tag, 'data-home-lang-href');
         if (!route) continue;
-        for (const language of [
-          'typescript',
-          'python',
-          'java',
-          'cpp',
-          'go',
-          'rust',
-        ]) {
-          refs.push(`/${language}/${route}`);
+        for (const language of siteLanguages) {
+          refs.push(new URL(`${language}/${route}`, checkBaseURL).href);
         }
       }
     }
@@ -411,14 +447,20 @@ try {
         failures.push(
           `${path.relative(destination, file)} -> ${ref} (${path.relative(destination, target)})`
         );
+      } else if (target.endsWith('.html') && ref.includes('#')) {
+        const fragment = decodeURIComponent(ref.slice(ref.indexOf('#') + 1));
+        if (fragment && !(await idsFor(target)).has(fragment)) {
+          failures.push(`${rel} -> ${ref} (missing fragment ${fragment})`);
+        }
       }
     }
     collectQualityFailures(rel, html, qualityFailures);
   }
 
-  if (academyHtmlFiles.length !== 426) {
+  const expectedAcademyPages = academyPagesPerLanguage * siteLanguages.length;
+  if (academyHtmlFiles.length !== expectedAcademyPages) {
     qualityFailures.push(
-      `Academy must generate 71 pages for each of 6 languages (426 total; found ${academyHtmlFiles.length})`
+      `Academy must generate ${academyPagesPerLanguage} pages for each of ${siteLanguages.length} languages (${expectedAcademyPages} total; found ${academyHtmlFiles.length})`
     );
   }
 
@@ -474,38 +516,29 @@ function run(command, args) {
 
 function localRefs(html) {
   const refs = [];
-  const regex = /\s(?:href|src)="([^"]+)"/g;
-  for (const match of html.matchAll(regex)) {
-    let ref = match[1];
-    if (ref === checkBasePrefix || ref.startsWith(`${checkBasePrefix}/`)) {
-      ref = ref.slice(checkBasePrefix.length) || '/';
+  // Hugo minifies attributes without quotes and canonifies internal URLs.
+  // Checking only quoted relative links would silently skip most of the site.
+  for (const [tag] of html.matchAll(/<[a-z][^>]*>/gi)) {
+    for (const attr of ['href', 'src']) {
+      const ref = attrValue(tag, attr).replaceAll('&amp;', '&');
+      if (!ref) continue;
+      const url = new URL(ref, checkBaseURL);
+      if (url.origin === new URL(checkBaseURL).origin) refs.push(ref);
     }
-    if (
-      ref.startsWith('http://') ||
-      ref.startsWith('https://') ||
-      ref.startsWith('mailto:') ||
-      ref.startsWith('tel:') ||
-      ref.startsWith('data:') ||
-      ref.startsWith('javascript:') ||
-      ref.startsWith('#')
-    ) {
-      continue;
-    }
-    refs.push(ref);
   }
   return refs;
 }
 
 function resolveRef(fromFile, ref) {
-  const [withoutHash] = ref.split('#');
-  const [withoutQuery] = withoutHash.split('?');
-  const pathname = decodeURIComponent(withoutQuery);
-  if (pathname === '/') return path.join(destination, 'index.html');
-
-  let target = ref.startsWith('/')
-    ? path.join(destination, pathname)
-    : path.resolve(path.dirname(fromFile), pathname);
-
+  const source = new URL(path.relative(destination, fromFile), checkBaseURL);
+  const url = new URL(ref, source);
+  if (!url.pathname.startsWith(checkBasePath)) {
+    throw new Error(`${fromFile}: local link escapes site base path: ${ref}`);
+  }
+  let target = path.join(
+    destination,
+    decodeURIComponent(url.pathname.slice(checkBasePath.length))
+  );
   if (path.extname(target) === '') {
     target = path.join(target, 'index.html');
   }
@@ -687,19 +720,13 @@ function collectQualityFailures(rel, html, failures) {
     }
   }
 
-  if (
-    /^(?:typescript|python|java|cpp|go|rust)\/academy\/review\/index\.html$/.test(
-      rel
-    )
-  ) {
+  if (academyReviewPage.test(rel)) {
     if (!html.includes('data-academy-review-queue')) {
       failures.push(`${rel}: Academy daily review queue missing`);
     }
   }
 
-  if (
-    /^(?:typescript|python|java|cpp|go|rust)\/academy\/index\.html$/.test(rel)
-  ) {
+  if (academyDashboardPage.test(rel)) {
     if (!hasClass(html, 'div', 'academy-roadmap')) {
       failures.push(`${rel}: Academy dashboard missing learning path`);
     }
@@ -1243,7 +1270,7 @@ function collectQualityFailures(rel, html, failures) {
 }
 
 async function collectSkillPageFailures(destination, failures) {
-  const languages = ['typescript', 'python', 'java', 'cpp', 'go', 'rust'];
+  const languages = siteLanguages;
   for (const language of languages) {
     const indexPath = path.join(
       destination,
@@ -1287,35 +1314,27 @@ function slugify(value) {
 }
 
 function isCuratedApiPage(rel) {
-  return /^(?:typescript|python|java|cpp|go|rust)\/api\/(?:ai|ax|s|agent|flow|optimize)\/index\.html$/.test(
-    rel
-  );
+  return curatedApiPage.test(rel);
 }
 
 function isApiPage(rel) {
-  return /^(?:typescript|python|java|cpp|go|rust)\/api\//.test(rel);
+  return apiPage.test(rel);
 }
 
 function isTocExpectedPage(rel) {
-  return /^(?:typescript|python|java|cpp|go|rust)\/(?:quick-start|how-ax-fits-together|advanced-start|faq|examples(?:\/[^/]+)?|concepts\/[^/]+|subsystems\/[^/]+)\/index\.html$/.test(
-    rel
-  );
+  return tocExpectedPage.test(rel);
 }
 
 function isMermaidExpectedPage(rel) {
-  return /^(?:typescript|python|java|cpp|go|rust)\/(?:quick-start|how-ax-fits-together|agents(?:\/(?:standard|long-horizon|internals))?|concepts\/(?:dspy|signatures|tools|llms|mcp|optimization|telemetry)|subsystems\/(?:ai|ax|s|flow|optimize))\/index\.html$/.test(
-    rel
-  );
+  return mermaidExpectedPage.test(rel);
 }
 
 function isLanguageDocsPage(rel) {
-  return /^(?:typescript|python|java|cpp|go|rust)\/.+\/index\.html$/.test(rel);
+  return languageDocsPage.test(rel);
 }
 
 function isAcademyPage(rel) {
-  return /^(?:typescript|python|java|cpp|go|rust)\/academy(?:\/.*)?\/index\.html$/.test(
-    rel
-  );
+  return academyPage.test(rel);
 }
 
 function hasInlinePageToc(html) {
@@ -1380,7 +1399,7 @@ function hasClass(html, tag, className) {
 
 function attrValue(tagSource, attr) {
   const match = tagSource.match(
-    new RegExp(`\\b${attr}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i')
+    new RegExp(`\\s${attr}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i')
   );
   return match?.[1] ?? match?.[2] ?? match?.[3] ?? '';
 }

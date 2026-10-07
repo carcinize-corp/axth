@@ -4,7 +4,7 @@ import os
 import copy
 import re
 from typing import Any
-from .signature import _js_date_millis, _js_number_text, _js_format
+from .signature import _js_date_millis, _js_number_text, _js_format, _js_json_dumps, _js_text
 # AXIR_CORE_IMPORTS
 
 
@@ -177,6 +177,14 @@ def _core_string_lower(value):
 
 def _core_string_format(template, *args):
     return _js_format(template, args)
+
+
+def _core_string_str(value):
+    return _js_text(value)
+
+
+def _core_json_stringify(value):
+    return _js_json_dumps(value)
 
 
 def _core_description_append(base, hint):

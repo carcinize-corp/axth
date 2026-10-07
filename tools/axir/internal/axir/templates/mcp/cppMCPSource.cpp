@@ -65,6 +65,16 @@ static std::string content_text(Value content) {
   return out.str();
 }
 
+// Exact equality, where a fixture pins a whole wire message rather than the
+// keys it cares about. Compared as key-sorted JSON, so an extra or missing
+// key fails while the order two objects happened to be built in does not.
+static void expect_exact_local(Value actual, Value expected, const std::string& label) {
+  auto left = display(Core::json_stable_stringify(actual));
+  auto right = display(Core::json_stable_stringify(expected));
+  if (left != right)
+    throw AxError("fixture", label + " mismatch: expected " + right + ", got " + left);
+}
+
 static void expect_subset_local(Value actual, Value expected, const std::string& label) {
   if (expected.is_null()) return;
   if (expected.is_object()) {
@@ -173,7 +183,7 @@ void AxMCPClient::record_task(Value task,bool from_notification){auto task_id=Co
 // The recorded tasks a modern listener asks updates for, as TypeScript's
 // listener does when something listens for them.
 Value AxMCPClient::listen_task_ids(){Value ids=Value::array();if(state_->notification_listeners_.empty()||!has_tasks_capability())return ids;std::lock_guard<std::mutex> lock(state_->task_mutex_);for(const auto& item:state_->tasks_)Core::append(ids,item.first);return ids;}
-Value AxMCPClient::await_modern_task(const std::string& task_id){auto max=static_cast<int>(Core::number(Core::get(state_->options_,"maxTaskPolls",1000)));for(int poll=0;poll<max;++poll){auto outcome=Core::mcp_task_terminal_outcome(get_task(task_id));auto kind=display(Core::get(outcome,"kind",""));if(kind=="result")return Core::json_parse(Core::json_stringify(Core::get(outcome,"result",Value::object())));if(kind=="protocol_error")throw AxError("mcp",display(Core::get(outcome,"message","MCP task failed")),"",0,display(Core::get(outcome,"code",0)),false);if(kind=="violation"||kind=="failure"||kind=="cancelled")throw AxError("mcp",display(Core::get(outcome,"message","MCP task failed")));if(kind=="input_required"){auto fulfillment=Core::mcp_mrtr_plan_fulfillment(Core::get(outcome,"inputRequests",Value::object()),Core::get(state_->options_,"roots",Value()),static_cast<bool>(state_->elicitation_handler_),false);if(!Core::truthy(Core::get(fulfillment,"ok",false)))throw AxError("mcp",display(Core::get(fulfillment,"message","MCP protocol violation")));auto responses=Core::get(fulfillment,"responses",Value::object());for(auto entry:as_object_local(Core::get(fulfillment,"pending",Value::object()))){if(entry.first=="__order")continue;auto method=display(Core::get(entry.second,"method",""));if(!state_->elicitation_handler_||method!="elicitation/create")throw AxError("mcp","MCP protocol violation: unsupported pending task input request method "+method);Core::set(responses,entry.first,state_->elicitation_handler_(Core::get(entry.second,"params",Value::object()),object({{"client","AxMCPClient"},{"namespace",namespace_name()}})));}provide_task_input(task_id,responses);}}throw AxError("mcp","MCP task "+task_id+" exceeded "+std::to_string(max)+" polls");}
+Value AxMCPClient::await_modern_task(const std::string& task_id){auto max=static_cast<int>(Core::number(Core::get(state_->options_,"maxTaskPolls",1000)));for(int poll=0;poll<max;++poll){auto outcome=Core::mcp_task_terminal_outcome(get_task(task_id));auto kind=display(Core::get(outcome,"kind",""));if(kind=="result")return Core::json_parse(Core::json_stringify(Core::get(outcome,"result",Value::object())));if(kind=="protocol_error")throw AxError("mcp",display(Core::get(outcome,"message","MCP task failed")),"",0,display(Core::get(outcome,"code",0)),false);if(kind=="violation"||kind=="failure"||kind=="cancelled")throw AxError("mcp",display(Core::get(outcome,"message","MCP task failed")));if(kind=="input_required"){auto fulfillment=Core::mcp_mrtr_plan_fulfillment(Core::get(outcome,"inputRequests",Value::object()),Core::get(state_->options_,"roots",Value()),static_cast<bool>(state_->elicitation_handler_),static_cast<bool>(state_->sampling_handler_));if(!Core::truthy(Core::get(fulfillment,"ok",false)))throw AxError("mcp",display(Core::get(fulfillment,"message","MCP protocol violation")));auto responses=Core::get(fulfillment,"responses",Value::object());for(auto entry:as_object_local(Core::get(fulfillment,"pending",Value::object()))){if(entry.first=="__order")continue;auto method=display(Core::get(entry.second,"method",""));auto pending_handler=pending_input_handler(method);if(!pending_handler)throw AxError("mcp","MCP protocol violation: unsupported pending task input request method "+method);Core::set(responses,entry.first,pending_handler(Core::get(entry.second,"params",Value::object()),object({{"client","AxMCPClient"},{"namespace",namespace_name()}})));}provide_task_input(task_id,responses);}}throw AxError("mcp","MCP task "+task_id+" exceeded "+std::to_string(max)+" polls");}
 Value AxMCPClient::tool_headers(const std::string& name,Value arguments)const{if(state_->era_!="modern")return Value::object();for(auto tool:state_->tools_)if(display(Core::get(tool,"name",""))==name){auto bindings=Core::mcp_param_header_bindings(Core::get(tool,"inputSchema",Value::object()));return Core::mcp_param_header_values(bindings,arguments);}return Value::object();}
 Value AxMCPClient::list_prompts(const std::string& cursor) { return request("prompts/list", cursor_params(cursor)); }
 Value AxMCPClient::get_prompt(const std::string& name, Value arguments) { return request_with_input_rounds("prompts/get", object({{"name", name}, {"arguments", arguments}}),Value::object()); }
@@ -213,7 +223,11 @@ Value AxMCPClient::request(const std::string& method, Value params) {
 void AxMCPClient::set_tool_authorizer(std::function<std::optional<bool>(const AxMCPClient&, Value)> handler){state_->tool_authorizer_=std::move(handler);}
 void AxMCPClient::set_elicitation_handler(std::function<Value(Value,Value)> handler){state_->elicitation_handler_=std::move(handler);}
 
-Value AxMCPClient::request_with_input_rounds(const std::string& method,Value base_params,Value headers){auto params=Core::json_parse(Core::json_stringify(base_params));auto max_rounds=Core::get(state_->options_,"maxInputRounds",Value());for(int round=0;;++round){auto result=request_with_headers(method,params,headers,true);auto plan=Core::mcp_mrtr_plan_round(result,state_->era_.empty()?"legacy":state_->era_,method,round,max_rounds);auto action=display(Core::get(plan,"action",""));if(action=="complete")return result;if(action=="violation")throw AxError("mcp",display(Core::get(plan,"message","MCP protocol violation")));Value input_responses;auto requests=Core::get(plan,"inputRequests",Value());if(Core::truthy(Core::get(plan,"hasInputRequests",false))&&requests.is_object()){auto fulfillment=Core::mcp_mrtr_plan_fulfillment(requests,Core::get(state_->options_,"roots",Value()),static_cast<bool>(state_->elicitation_handler_),false);if(!Core::truthy(Core::get(fulfillment,"ok",false)))throw AxError("mcp",display(Core::get(fulfillment,"message","MCP protocol violation")));auto responses=Core::get(fulfillment,"responses",Value::object());for(auto entry:as_object_local(Core::get(fulfillment,"pending",Value::object()))){if(entry.first=="__order")continue;auto pending_method=display(Core::get(entry.second,"method",""));if(pending_method!="elicitation/create")throw AxError("mcp","MCP protocol violation: unsupported pending MRTR input request method "+pending_method);Core::set(responses,entry.first,state_->elicitation_handler_(Core::get(entry.second,"params",Value::object()),object({{"namespace",namespace_name()}})));}input_responses=responses;}Value request_state;if(Core::truthy(Core::get(plan,"hasRequestState",false)))request_state=Core::get(plan,"requestState",Value());params=Core::mcp_mrtr_next_params(base_params,input_responses,request_state);}}
+void AxMCPClient::set_sampling_handler(std::function<Value(Value,Value)> handler){state_->sampling_handler_=std::move(handler);}
+
+Value AxMCPClient::tool_specs() const { return Value(Array(state_->tools_.begin(), state_->tools_.end())); }
+
+Value AxMCPClient::request_with_input_rounds(const std::string& method,Value base_params,Value headers){auto params=Core::json_parse(Core::json_stringify(base_params));auto max_rounds=Core::get(state_->options_,"maxInputRounds",Value());for(int round=0;;++round){auto result=request_with_headers(method,params,headers,true);auto plan=Core::mcp_mrtr_plan_round(result,state_->era_.empty()?"legacy":state_->era_,method,round,max_rounds);auto action=display(Core::get(plan,"action",""));if(action=="complete")return result;if(action=="violation")throw AxError("mcp",display(Core::get(plan,"message","MCP protocol violation")));Value input_responses;auto requests=Core::get(plan,"inputRequests",Value());if(Core::truthy(Core::get(plan,"hasInputRequests",false))&&requests.is_object()){auto fulfillment=Core::mcp_mrtr_plan_fulfillment(requests,Core::get(state_->options_,"roots",Value()),static_cast<bool>(state_->elicitation_handler_),static_cast<bool>(state_->sampling_handler_));if(!Core::truthy(Core::get(fulfillment,"ok",false)))throw AxError("mcp",display(Core::get(fulfillment,"message","MCP protocol violation")));auto responses=Core::get(fulfillment,"responses",Value::object());for(auto entry:as_object_local(Core::get(fulfillment,"pending",Value::object()))){if(entry.first=="__order")continue;auto pending_method=display(Core::get(entry.second,"method",""));auto pending_handler=pending_input_handler(pending_method);if(!pending_handler)throw AxError("mcp","MCP protocol violation: unsupported pending MRTR input request method "+pending_method);Core::set(responses,entry.first,pending_handler(Core::get(entry.second,"params",Value::object()),object({{"namespace",namespace_name()}})));}input_responses=responses;}Value request_state;if(Core::truthy(Core::get(plan,"hasRequestState",false)))request_state=Core::get(plan,"requestState",Value());params=Core::mcp_mrtr_next_params(base_params,input_responses,request_state);}}
 
 Value AxMCPClient::request_with_headers(const std::string& method,Value params,Value headers,bool allow_version_retry){
   Value message = object({{"jsonrpc", "2.0"}, {"id", std::to_string(state_->next_id_++)}, {"method", method}});
@@ -225,17 +239,43 @@ Value AxMCPClient::request_with_headers(const std::string& method,Value params,V
   auto result=Core::get(response,"result",Value::object());if(state_->era_=="modern"){auto info=Core::get(Core::get(result,"_meta",Value::object()),"io.modelcontextprotocol/serverInfo",Value());if(!info.is_null()&&!display(Core::get(info,"name","")).empty()&&!display(Core::get(info,"version","")).empty())set_server_info(info);}return result;
 }
 
-Value AxMCPClient::client_capabilities()const{Value out=Core::get(state_->options_,"capabilities",Value::object());auto tasks=Core::get(state_->options_,"tasksExtension",Value());auto enabled=tasks.is_null()||Core::truthy(tasks);auto has_elicitation=static_cast<bool>(state_->elicitation_handler_);auto derived=Core::mcp_client_capabilities(!Core::get(state_->options_,"roots",Value()).is_null(),false,has_elicitation,state_->era_.empty()?"legacy":state_->era_,enabled);for(auto entry:as_object_local(derived))if(!value_has(out,entry.first))Core::set(out,entry.first,entry.second);value_erase(out,"sampling");if(!has_elicitation)value_erase(out,"elicitation");return out;}
+// The advertised capabilities are the ones this client can actually honour:
+// sampling and elicitation appear only while a handler is installed, so a
+// server is never told to send a request that would come back unsupported.
+Value AxMCPClient::client_capabilities()const{Value out=Core::get(state_->options_,"capabilities",Value::object());auto tasks=Core::get(state_->options_,"tasksExtension",Value());auto enabled=tasks.is_null()||Core::truthy(tasks);auto has_elicitation=static_cast<bool>(state_->elicitation_handler_);auto has_sampling=static_cast<bool>(state_->sampling_handler_);auto derived=Core::mcp_client_capabilities(!Core::get(state_->options_,"roots",Value()).is_null(),has_sampling,has_elicitation,state_->era_.empty()?"legacy":state_->era_,enabled);for(auto entry:as_object_local(derived))if(!value_has(out,entry.first))Core::set(out,entry.first,entry.second);if(!has_sampling)value_erase(out,"sampling");if(!has_elicitation)value_erase(out,"elicitation");return out;}
+
+std::function<Value(Value,Value)> AxMCPClient::pending_input_handler(const std::string& method) const {
+  if (method == "elicitation/create") return state_->elicitation_handler_;
+  if (method == "sampling/createMessage") return state_->sampling_handler_;
+  return nullptr;
+}
 
 Value AxMCPClient::handle_server_request(Value request) {
-  auto plan = Core::mcp_server_request_plan(
+  // The full plan is the one that knows about sampling. The three-argument
+  // mcp_server_request_plan keeps answering -32601 for it, so a port that
+  // calls that contract does not change behaviour.
+  auto plan = Core::mcp_server_request_plan_full(
       request, Core::get(state_->options_, "roots", Value()),
-      static_cast<bool>(state_->elicitation_handler_));
-  if (display(Core::get(plan, "action", "")) == "respond") {
+      static_cast<bool>(state_->elicitation_handler_),
+      static_cast<bool>(state_->sampling_handler_));
+  auto action = display(Core::get(plan, "action", ""));
+  if (action == "respond") {
     return Core::get(plan, "response", Value::object());
   }
+  auto handler = action == "sampling" ? state_->sampling_handler_ : state_->elicitation_handler_;
+  if (!handler) {
+    // Core only asks for a handler it was told exists, so this cannot be
+    // reached by a server; it would mean the plan and the installed
+    // handlers disagree, which is worth reporting rather than crashing.
+    return object(
+        {{"jsonrpc", "2.0"},
+         {"id", Core::get(plan, "id", Value())},
+         {"error", object({{"code", -32601},
+                           {"message", "Unsupported server request: " +
+                                           display(Core::get(request, "method", ""))}})}});
+  }
   try {
-    auto result = state_->elicitation_handler_(
+    auto result = handler(
         Core::get(plan, "params", Value::object()),
         object({{"client", "AxMCPClient"}, {"namespace", namespace_name()}}));
     return object({{"jsonrpc", "2.0"},
@@ -286,6 +326,215 @@ void AxMCPClient::set_server_info(Value info){std::lock_guard<std::mutex> lock(s
 std::string AxMCPClient::namespace_name() const {
   std::string configured = display(Core::get(state_->options_, "namespace", ""));
   if(!configured.empty())return configured;auto server=display(Core::get(server_info_snapshot(),"name",""));return server.empty()?"mcp":server;
+}
+
+// ---------------------------------------------------------------------------
+// MCP Apps host bridge
+// ---------------------------------------------------------------------------
+
+// Decode a standard base64 body. A resource body is attacker-controlled, so
+// anything that is not well-formed base64 is refused rather than decoded as
+// far as it goes: the caller turns that into "blob is not valid base64 HTML".
+static bool ax_mcp_base64_decode(const std::string& input, std::string& out) {
+  static const std::string alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  if (input.size() % 4 != 0) return false;
+  out.clear();
+  std::uint32_t bits = 0;
+  int count = 0;
+  size_t padding = 0;
+  for (size_t index = 0; index < input.size(); ++index) {
+    char character = input[index];
+    if (character == '=') {
+      // Padding is only legal in the final quantum, and at most twice.
+      if (index + 2 < input.size()) return false;
+      ++padding;
+      bits <<= 6;
+      if (++count == 4) count = 0;
+      continue;
+    }
+    if (padding) return false;
+    auto position = alphabet.find(character);
+    if (position == std::string::npos) return false;
+    bits = (bits << 6) | static_cast<std::uint32_t>(position);
+    if (++count == 4) {
+      out.push_back(static_cast<char>((bits >> 16) & 0xff));
+      out.push_back(static_cast<char>((bits >> 8) & 0xff));
+      out.push_back(static_cast<char>(bits & 0xff));
+      bits = 0;
+      count = 0;
+    }
+  }
+  if (padding == 1) {
+    out.push_back(static_cast<char>((bits >> 16) & 0xff));
+    out.push_back(static_cast<char>((bits >> 8) & 0xff));
+  } else if (padding == 2) {
+    out.push_back(static_cast<char>((bits >> 16) & 0xff));
+  } else if (padding > 2) {
+    return false;
+  }
+  return true;
+}
+
+static Value ax_mcp_app_tool_spec(AxMCPClient& client, const std::string& name) {
+  for (auto spec : as_array_local(client.tool_specs()))
+    if (display(Core::get(spec, "name", "")) == name) return spec;
+  throw AxError("mcp", "MCP App tool not found: " + name);
+}
+
+AxMCPAppBridge::AxMCPAppBridge(AxMCPClient& client, const std::string& tool_name, Options options)
+    : client_(client), tool_(ax_mcp_app_tool_spec(client, tool_name)), options_(std::move(options)) {}
+
+AxMCPAppBridge::AxMCPAppBridge(AxMCPClient& client, Value tool, Options options)
+    : client_(client), tool_(std::move(tool)), options_(std::move(options)) {
+  if (!tool_.is_object()) throw AxError("mcp", "MCP App tool not found");
+}
+
+Value AxMCPAppBridge::load_resource() {
+  std::string tool_name = display(Core::get(tool_, "name", ""));
+  auto uri = display(Core::get(Core::mcp_app_tool_meta(tool_), "resourceUri", ""));
+  // Core's resource plan refuses a non-ui:// URI too, but the read has to be
+  // stopped before it happens: a tool without an App resource must not send
+  // the host off to fetch an arbitrary URI.
+  if (uri.rfind("ui://", 0) != 0)
+    throw AxError("mcp", "MCP App tool " + tool_name + " has no valid ui:// resource");
+  auto response = client_.read_resource(uri);
+  Value item;
+  for (auto content : as_array_local(Core::get(response, "contents", Value::array())))
+    if (display(Core::get(content, "uri", "")) == uri) { item = content; break; }
+  if (!item.is_object()) throw AxError("mcp", "MCP App resource " + uri + " was not returned");
+  std::string html;
+  if (value_has(item, "text")) {
+    html = display(Core::get(item, "text", ""));
+  } else {
+    if (!ax_mcp_base64_decode(display(Core::get(item, "blob", "")), html))
+      throw AxError("mcp", "MCP App resource blob is not valid base64 HTML");
+  }
+  auto meta = Core::get(Core::get(item, "_meta", Value::object()), "ui", Value());
+  auto plan = Core::mcp_app_resource_plan(
+      tool_name, uri, Core::get(item, "mimeType", "<missing>"), html,
+      meta.is_object() ? Core::json_parse(Core::json_stringify(meta)) : Value::object());
+  if (!Core::truthy(Core::get(plan, "ok", false)))
+    throw AxError("mcp", display(Core::get(plan, "message", "MCP App resource was refused")));
+  return Core::get(plan, "resource", Value::object());
+}
+
+// What Core needs to decide an action: the identity of this App, the tools it
+// may reach, and which host callbacks exist. A missing callback is reported
+// honestly, so Core answers the frame that the facility is disabled instead
+// of the host accepting a request it cannot carry out.
+Value AxMCPAppBridge::view_context() const {
+  return object({{"namespace", client_.namespace_name()},
+                 {"tool", Core::get(tool_, "name", "")},
+                 {"tools", client_.tool_specs()},
+                 {"hostCapabilities", options_.host_capabilities},
+                 {"hostContext", options_.host_context},
+                 {"canOpenLink", static_cast<bool>(options_.open_link)},
+                 {"canSendMessage", static_cast<bool>(options_.send_message)},
+                 {"canUpdateModelContext", static_cast<bool>(options_.update_model_context)}});
+}
+
+Value AxMCPAppBridge::handle_view_message(Value message) {
+  bool is_request = value_has(message, "id");
+  try {
+    auto plan = Core::mcp_app_view_message_plan(message, initialized_, view_context());
+    auto action = display(Core::get(plan, "action", ""));
+    if (action == "error") throw AxError("mcp", display(Core::get(plan, "reason", "MCP App request failed")));
+    if (action == "initialized") { initialized_ = true; return Value(); }
+    if (action == "ignore") return Value();
+    if (action == "log") {
+      if (options_.log) options_.log(Core::get(plan, "params", Value()));
+      return Value();
+    }
+    if (action == "size-changed") {
+      if (options_.size_changed) options_.size_changed(Core::get(plan, "size", Value::object()));
+      return Value();
+    }
+    Value result = Value::object();
+    if (action == "respond") {
+      result = Core::get(plan, "result", Value::object());
+    } else {
+      // The host authorizes the action Core resolved, before any effect.
+      if (options_.authorize &&
+          !options_.authorize(object({{"method", action},
+                                      {"params", Core::get(message, "params", Value())},
+                                      {"namespace", client_.namespace_name()},
+                                      {"tool", Core::get(tool_, "name", "")}})))
+        throw AxError("mcp", "MCP App request denied: " + action);
+      if (action == "call-tool") {
+        result = client_.call_tool(display(Core::get(plan, "name", "")),
+                                   Core::get(plan, "arguments", Value::object()));
+      } else if (action == "read-resource") {
+        result = client_.read_resource(display(Core::get(plan, "uri", "")));
+      } else if (action == "open-link") {
+        options_.open_link(display(Core::get(plan, "url", "")));
+      } else if (action == "send-message") {
+        options_.send_message(Core::get(plan, "params", Value::object()));
+      } else if (action == "update-model-context") {
+        options_.update_model_context(Core::get(plan, "update", Value::object()));
+      } else if (action == "request-display-mode") {
+        // The host grants a mode; the frame only asks. Without a callback
+        // the App stays inline rather than being given what it asked for.
+        auto mode = options_.request_display_mode
+                        ? options_.request_display_mode(display(Core::get(plan, "mode", "inline")))
+                        : std::string("inline");
+        // Core validated what the frame asked for; nothing had validated
+        // what the host answered. A host that grants a mode the protocol
+        // does not define is a host bug, and letting it through would put
+        // an undefined mode in a response the frame acts on.
+        if (mode != "inline" && mode != "fullscreen" && mode != "pip")
+          throw AxError("mcp", "host granted an invalid MCP App display mode " + mode);
+        result = object({{"mode", mode}});
+      } else {
+        throw AxError("mcp", "Unknown MCP App action: " + action);
+      }
+    }
+    return object({{"jsonrpc", "2.0"}, {"id", Core::get(message, "id", Value())}, {"result", result}});
+  } catch (const std::exception& error) {
+    // A notification has no response to carry the reason, so it throws.
+    if (!is_request) throw;
+    return object({{"jsonrpc", "2.0"},
+                   {"id", Core::get(message, "id", Value())},
+                   {"error", object({{"code", -32000}, {"message", error.what()}})}});
+  }
+}
+
+void AxMCPAppBridge::notify(const std::string& method, Value params) {
+  if (!initialized_) throw AxError("mcp", "MCP App is not initialized");
+  if (options_.send_to_view)
+    options_.send_to_view(object({{"jsonrpc", "2.0"}, {"method", method}, {"params", std::move(params)}}));
+}
+
+void AxMCPAppBridge::notify_tool_input(Value arguments) {
+  notify("ui/notifications/tool-input", object({{"arguments", std::move(arguments)}}));
+}
+
+void AxMCPAppBridge::notify_tool_input_partial(Value arguments) {
+  notify("ui/notifications/tool-input-partial", object({{"arguments", std::move(arguments)}}));
+}
+
+void AxMCPAppBridge::notify_tool_result(Value result) {
+  notify("ui/notifications/tool-result", std::move(result));
+}
+
+void AxMCPAppBridge::notify_tool_cancelled(const std::string& reason) {
+  notify("ui/notifications/tool-cancelled", object({{"reason", reason}}));
+}
+
+void AxMCPAppBridge::notify_host_context_changed(Value context) {
+  notify("ui/notifications/host-context-changed", std::move(context));
+}
+
+void AxMCPAppBridge::teardown(const std::string& reason) {
+  // Teardown is a request, not a notification, and it is the one message the
+  // host sends after the App stops being initialized.
+  auto request_id = next_id_++;
+  if (options_.send_to_view)
+    options_.send_to_view(object({{"jsonrpc", "2.0"},
+                                  {"id", static_cast<double>(request_id)},
+                                  {"method", "ui/resource-teardown"},
+                                  {"params", object({{"reason", reason}})}}));
+  initialized_ = false;
 }
 
 static const std::vector<std::string>& ax_ucp_operations() {
@@ -1007,6 +1256,11 @@ void run_mcp_conformance_fixture(Value fixture) {
     }
     auto transport = std::make_shared<AxMCPScriptedTransport>(Core::get(fixture, "responses", Core::get(fixture, "transport_responses", Value::array())));
     AxMCPClient client(transport, Core::get(fixture, "client_options", Value::object()));
+    // Sampling is available only while a handler is installed, so the
+    // fixture installs one and the without_handler case below uses a client
+    // that has none.
+    std::vector<Value> sampling_params;std::vector<Value> sampling_contexts;
+    if(op=="server_requests_sampling")client.set_sampling_handler([&](Value params,Value context){sampling_params.push_back(params);sampling_contexts.push_back(context);return Core::get(fixture,"sampling_result",Value::object());});
     Value elicitation_params=Value::object();Value elicitation_context=Value::object();int elicitation_calls=0;if(op=="mrtr_elicitation"||op=="tasks_v2_input_required"||op=="server_requests_legacy")client.set_elicitation_handler([&](Value params,Value context){if(Core::truthy(Core::get(params,"fail",false)))throw AxError("mcp","fixture handler failed");++elicitation_calls;elicitation_params=params;elicitation_context=context;return Core::get(fixture,"elicitation_result",Value::object());});
     client.init();
     if (op!="client_discovery" && !Core::get(fixture, "expected_protocol_version", Value()).is_null() &&
@@ -1024,6 +1278,238 @@ void run_mcp_conformance_fixture(Value fixture) {
     } else if(op=="tasks_v2_modern"){expect_subset_local(client.call_tool("slow",Value::object()),Core::get(fixture,"expected_call_result",Value::object()),"task call result");client.provide_task_input("task-1",Value::object());client.cancel_task("task-1");try{client.list_tasks();throw AxError("fixture","missing modern tasks/list rejection");}catch(const AxError& error){if(std::string(error.what()).find(display(Core::get(fixture,"expected_list_error","")))==std::string::npos)throw;}try{client.get_task_result("task-1");throw AxError("fixture","missing modern tasks/result rejection");}catch(const AxError& error){if(std::string(error.what()).find(display(Core::get(fixture,"expected_result_error","")))==std::string::npos)throw;}Array methods;for(auto request:transport->requests)methods.push_back(display(Core::get(request,"method","")));expect_subset_local(Value(methods),Core::get(fixture,"expected_methods",Value::array()),"task request methods");if(methods.size()!=as_array_local(Core::get(fixture,"expected_methods",Value::array())).size())throw AxError("fixture","task request method count mismatch");
     } else if(op=="tasks_v2_input_required"){expect_subset_local(client.call_tool("slow",Value::object()),Core::get(fixture,"expected_result",Value::object()),"task input-required result");if(elicitation_calls!=1)throw AxError("fixture","task elicitation handler count mismatch");expect_subset_local(elicitation_params,Core::get(fixture,"expected_elicitation_params",Value::object()),"task elicitation params");expect_subset_local(elicitation_context,Core::get(fixture,"expected_context",Value::object()),"task elicitation context");Value update;Array methods;for(auto request:transport->requests){methods.push_back(display(Core::get(request,"method","")));if(display(Core::get(request,"method",""))=="tasks/update")update=request;}expect_subset_local(Core::get(update,"params",Value::object()),Core::get(fixture,"expected_update_params",Value::object()),"task update params");if(display(Core::json_stringify(Value(methods)))!=display(Core::json_stringify(Core::get(fixture,"expected_methods",Value::array()))))throw AxError("fixture","task input-required methods mismatch");
     } else if(op=="server_requests_legacy"){for(auto request:as_array_local(Core::get(fixture,"server_requests",Value::array())))transport->emit(request);auto expected=as_array_local(Core::get(fixture,"expected_responses",Value::array()));for(size_t index=0;index<expected.size();++index)expect_subset_local(transport->sent_responses[index],expected[index],"server response");if(elicitation_calls!=1)throw AxError("fixture","legacy elicitation handler count mismatch");expect_subset_local(elicitation_params,Core::get(fixture,"expected_elicitation_params",Value::object()),"legacy elicitation params");expect_subset_local(elicitation_context,Core::get(fixture,"expected_context",Value::object()),"legacy elicitation context");Value initialize;for(auto request:transport->requests)if(display(Core::get(request,"method",""))=="initialize")initialize=request;expect_subset_local(Core::get(Core::get(initialize,"params",Value::object()),"capabilities",Value::object()),Core::get(fixture,"expected_legacy_capabilities",Value::object()),"legacy client capabilities");
+    } else if(op=="server_requests_sampling"){
+      // Inbound sampling with a handler installed: the first request reaches
+      // the handler, and the two malformed ones are refused by Core before
+      // it, so a server cannot make the host run a handler on a shape the
+      // protocol does not allow.
+      for(auto request:as_array_local(Core::get(fixture,"server_requests",Value::array())))transport->emit(request);
+      auto expected=as_array_local(Core::get(fixture,"expected_responses",Value::array()));
+      if(transport->sent_responses.size()!=expected.size())throw AxError("fixture","sampling response count mismatch");
+      for(size_t index=0;index<expected.size();++index)expect_exact_local(transport->sent_responses[index],expected[index],"sampling response");
+      if(sampling_params.size()!=static_cast<size_t>(Core::number(Core::get(fixture,"expected_handler_calls",0))))throw AxError("fixture","sampling handler count mismatch");
+      expect_exact_local(sampling_params.front(),Core::get(fixture,"expected_handler_params",Value::object()),"sampling handler params");
+      expect_subset_local(sampling_contexts.front(),Core::get(fixture,"expected_context",Value::object()),"sampling context");
+      if(display(Core::get(sampling_contexts.front(),"client",""))!="AxMCPClient")throw AxError("fixture","sampling context omitted its client");
+      Value initialize;for(auto request:transport->requests)if(display(Core::get(request,"method",""))=="initialize")initialize=request;
+      expect_subset_local(Core::get(Core::get(initialize,"params",Value::object()),"capabilities",Value::object()),Core::get(fixture,"expected_capabilities",Value::object()),"sampling capabilities");
+      // Without a handler the same request is unsupported, and the
+      // capability is never advertised.
+      auto plain_transport=std::make_shared<AxMCPScriptedTransport>(Core::get(fixture,"responses",Value::array()));
+      AxMCPClient plain(plain_transport,Core::get(fixture,"client_options",Value::object()));
+      plain.init();
+      auto without=Core::get(fixture,"without_handler",Value::object());
+      plain_transport->emit(Core::get(without,"server_request",Value::object()));
+      if(plain_transport->sent_responses.size()!=1)throw AxError("fixture","sampling without a handler answered more than once");
+      expect_exact_local(plain_transport->sent_responses.front(),Core::get(without,"expected_response",Value::object()),"sampling without a handler");
+      Value plain_initialize;for(auto request:plain_transport->requests)if(display(Core::get(request,"method",""))=="initialize")plain_initialize=request;
+      auto plain_capabilities=Core::get(Core::get(plain_initialize,"params",Value::object()),"capabilities",Value::object());
+      for(auto forbidden:as_array_local(Core::get(without,"forbidden_capabilities",Value::array())))if(value_has(plain_capabilities,display(forbidden)))throw AxError("fixture","advertised a capability with no handler: "+display(forbidden));
+      // The three-argument contract other ports call must keep answering
+      // -32601, whatever this client can now do.
+      for(auto raw:as_array_local(Core::get(fixture,"legacy_plan_cases",Value::array())))expect_exact_local(Core::mcp_server_request_plan(Core::get(raw,"request",Value::object()),Value(),false),Core::get(raw,"expected",Value::object()),"three-argument server request plan");
+    } else if(op=="app_bridge"){
+      std::vector<Value> sent,updates,sizes;std::vector<std::string> links;
+      AxMCPAppBridge::Options options;
+      options.send_to_view=[&](Value message){sent.push_back(message);};
+      options.open_link=[&](std::string url){links.push_back(url);};
+      options.update_model_context=[&](Value update){updates.push_back(update);};
+      options.size_changed=[&](Value size){sizes.push_back(size);};
+      options.request_display_mode=[](std::string){return std::string("inline");};
+      auto tool_name=display(Core::get(fixture,"tool",""));
+      AxMCPAppBridge bridge(client,tool_name,options);
+      std::map<std::string,Value> tools;
+      for(auto spec:as_array_local(client.tool_specs()))tools[display(Core::get(spec,"name",""))]=spec;
+      if(!tools.count(tool_name))throw AxError("fixture","App tool missing from the catalog");
+      expect_exact_local(Core::mcp_app_tool_meta(tools[tool_name]),Core::get(fixture,"expected_tool_meta",Value::object()),"App tool meta");
+      for(auto raw:as_array_local(Core::get(fixture,"visibility_cases",Value::array()))){
+        auto name=display(Core::get(raw,"tool",""));
+        if(!tools.count(name))throw AxError("fixture","App visibility case names an unknown tool "+name);
+        auto visible=Core::truthy(Core::mcp_app_tool_visible_to(tools[name],Core::get(raw,"principal","")));
+        if(visible!=Core::truthy(Core::get(raw,"expected",false)))throw AxError("fixture","App visibility mismatch for "+name+" as "+display(Core::get(raw,"principal","")));
+      }
+      transport->push_response(Core::get(fixture,"resource_read",Value::object()));
+      expect_subset_local(bridge.load_resource(),Core::get(fixture,"expected_resource",Value::object()),"App resource");
+      // Each resource case needs its own client, because a resource is read
+      // once and validated as a whole.
+      auto load_content=[&](Value content){
+        auto responses=as_array_local(Core::get(fixture,"responses",Value::array()));
+        responses.push_back(object({{"method","resources/read"},{"result",object({{"contents",array({content})}})}}));
+        auto resource_transport=std::make_shared<AxMCPScriptedTransport>(Value(responses));
+        AxMCPClient resource_client(resource_transport,Core::get(fixture,"client_options",Value::object()));
+        resource_client.init();
+        AxMCPAppBridge resource_bridge(resource_client,tool_name);
+        return resource_bridge.load_resource();
+      };
+      for(auto raw:as_array_local(Core::get(fixture,"invalid_resources",Value::array()))){
+        auto note=display(Core::get(raw,"note",""));
+        try{load_content(Core::get(raw,"content",Value::object()));throw AxError("fixture","invalid App resource accepted: "+note);}
+        catch(const AxError& error){auto fragment=display(Core::get(raw,"expected_error_contains",""));if(std::string(error.what()).find(fragment)==std::string::npos)throw AxError("fixture","wrong refusal for "+note+": "+error.what());}
+      }
+      auto blob=Core::get(fixture,"blob_resource",Value::object());
+      if(display(Core::get(load_content(Core::get(blob,"content",Value::object())),"html",""))!=display(Core::get(blob,"expected_html","")))throw AxError("fixture","App blob body was not decoded");
+      for(auto raw:as_array_local(Core::get(fixture,"pre_initialize_cases",Value::array()))){
+        auto expected_error=Core::get(raw,"expected_error_contains",Value());
+        if(!expected_error.is_null()){
+          try{bridge.handle_view_message(Core::get(raw,"message",Value::object()));throw AxError("fixture","pre-initialize notification accepted");}
+          catch(const AxError& error){if(std::string(error.what()).find(display(expected_error))==std::string::npos)throw;}
+        } else {
+          expect_exact_local(bridge.handle_view_message(Core::get(raw,"message",Value::object())),Core::get(raw,"expected_response",Value::object()),"pre-initialize response");
+        }
+      }
+      expect_exact_local(bridge.handle_view_message(Core::get(fixture,"initialize_message",Value::object())),Core::get(fixture,"expected_initialize_response",Value::object()),"App initialize response");
+      bridge.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+      if(!bridge.initialized())throw AxError("fixture","App bridge did not record initialization");
+      for(auto raw:as_array_local(Core::get(fixture,"request_cases",Value::array()))){
+        auto note=display(Core::get(raw,"note",""));
+        auto scripted=Core::get(raw,"response",Value());
+        if(!scripted.is_null())transport->push_response(scripted);
+        auto request_start=transport->requests.size();auto link_start=links.size();auto update_start=updates.size();
+        expect_exact_local(bridge.handle_view_message(Core::get(raw,"message",Value::object())),Core::get(raw,"expected_response",Value::object()),"App request ("+note+")");
+        std::vector<Value> calls;
+        for(size_t index=request_start;index<transport->requests.size();++index)if(display(Core::get(transport->requests[index],"method",""))=="tools/call")calls.push_back(transport->requests[index]);
+        auto expected_request=Core::get(raw,"expected_tool_request",Value());
+        if(!expected_request.is_null()){
+          if(calls.size()!=1)throw AxError("fixture","App tool call count mismatch ("+note+")");
+          expect_exact_local(Core::get(calls.front(),"params",Value::object()),expected_request,"App tool call params ("+note+")");
+        }
+        auto expected_calls=Core::get(raw,"expected_tool_requests",Value());
+        if(!expected_calls.is_null()&&calls.size()!=static_cast<size_t>(Core::number(expected_calls)))throw AxError("fixture","App reached the wire when it should not have ("+note+")");
+        auto expected_links=Core::get(raw,"expected_open_links",Value());
+        if(!expected_links.is_null()&&links.size()-link_start!=static_cast<size_t>(Core::number(expected_links)))throw AxError("fixture","App link callback count mismatch ("+note+")");
+        auto expected_url=Core::get(raw,"expected_opened_url",Value());
+        if(!expected_url.is_null()){if(links.empty()||links.back()!=display(expected_url))throw AxError("fixture","App opened the wrong link ("+note+")");}
+        auto expected_update=Core::get(raw,"expected_model_context_update",Value());
+        if(!expected_update.is_null()){
+          if(updates.size()-update_start!=1)throw AxError("fixture","App model-context update count mismatch ("+note+")");
+          expect_exact_local(updates.back(),expected_update,"App model-context update ("+note+")");
+        }
+      }
+      // A bridge with no callbacks installed reports each facility disabled
+      // rather than accepting the request and dropping it.
+      AxMCPAppBridge disabled(client,tool_name);
+      disabled.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+      for(auto raw:as_array_local(Core::get(fixture,"disabled_cases",Value::array())))expect_exact_local(disabled.handle_view_message(Core::get(raw,"message",Value::object())),Core::get(raw,"expected_response",Value::object()),"App disabled ("+display(Core::get(raw,"note",""))+")");
+      auto reserved=Core::get(fixture,"reserved_notification",Value::object());
+      try{bridge.handle_view_message(Core::get(reserved,"message",Value::object()));throw AxError("fixture","reserved sandbox notification accepted");}
+      catch(const AxError& error){if(std::string(error.what()).find(display(Core::get(reserved,"expected_error_contains","")))==std::string::npos)throw;}
+      auto size_case=Core::get(fixture,"size_notification",Value::object());
+      bridge.handle_view_message(Core::get(size_case,"message",Value::object()));
+      if(sizes.size()!=1)throw AxError("fixture","App size notification was not delivered");
+      expect_exact_local(sizes.front(),Core::get(size_case,"expected_size",Value::object()),"App size");
+      sizes.clear();
+      auto invalid_size=Core::get(fixture,"invalid_size_notification",Value::object());
+      bridge.handle_view_message(Core::get(invalid_size,"message",Value::object()));
+      if(sizes.size()!=static_cast<size_t>(Core::number(Core::get(invalid_size,"expected_sizes",0))))throw AxError("fixture","App accepted a non-numeric size");
+      // A denied request must not reach the wire at all.
+      AxMCPAppBridge::Options deny_options;deny_options.authorize=[](Value){return false;};
+      AxMCPAppBridge denied(client,tool_name,deny_options);
+      denied.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+      auto denied_start=transport->requests.size();
+      auto denied_case=Core::get(fixture,"authorize_denied",Value::object());
+      expect_exact_local(denied.handle_view_message(Core::get(denied_case,"message",Value::object())),Core::get(denied_case,"expected_response",Value::object()),"App denied response");
+      if(transport->requests.size()-denied_start!=static_cast<size_t>(Core::number(Core::get(denied_case,"expected_tool_requests",0))))throw AxError("fixture","denied App request still reached the wire");
+      sent.clear();
+      bridge.notify_tool_input(object({{"item","sku-2"}}));
+      bridge.notify_tool_result(object({{"structuredContent",object({{"picked","sku-2"}})}}));
+      auto expected_notifications=as_array_local(Core::get(fixture,"expected_notifications",Value::array()));
+      if(sent.size()!=expected_notifications.size())throw AxError("fixture","App notification count mismatch");
+      for(size_t index=0;index<expected_notifications.size();++index)expect_exact_local(sent[index],expected_notifications[index],"App notification");
+      bridge.teardown(display(Core::get(fixture,"teardown_reason","")));
+      if(sent.empty())throw AxError("fixture","App teardown was not delivered");
+      expect_subset_local(sent.back(),Core::get(fixture,"expected_teardown",Value::object()),"App teardown");
+      if(static_cast<long>(Core::number(Core::get(sent.back(),"id",0)))!=1)throw AxError("fixture","App teardown request id mismatch");
+      try{bridge.notify_tool_input(Value::object());throw AxError("fixture","App still sends notifications after teardown");}
+      catch(const AxError& error){if(std::string(error.what()).find("not initialized")==std::string::npos)throw;}
+
+      // ---- native checks beyond the shared fixture ----
+      // These pin four behaviours the 46 fixtures do not reach. Each was
+      // compared against the Lisp host bridge, which is the reference for
+      // the host side of this protocol.
+      {
+        // 1. A host that grants a display mode the protocol does not define
+        // is a host bug. Core validates what the frame asked for; nothing
+        // validated what the host answered, so an undefined mode would have
+        // reached the frame as a successful result.
+        AxMCPAppBridge::Options bad_mode;
+        bad_mode.request_display_mode=[](std::string){return std::string("cinema");};
+        AxMCPAppBridge host(client,tool_name,bad_mode);
+        host.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+        auto answer=host.handle_view_message(object({{"jsonrpc","2.0"},{"id","mode-host"},{"method","ui/request-display-mode"},{"params",object({{"mode","fullscreen"}})}}));
+        if(!value_has(answer,"error"))throw AxError("fixture","host granted an undefined display mode and it was accepted");
+        if(display(Core::get(Core::get(answer,"error",Value::object()),"message","")).find("invalid MCP App display mode")==std::string::npos)throw AxError("fixture","wrong refusal for an invalid host display mode");
+        // An empty host answer is malformed too, and must not read as inline.
+        AxMCPAppBridge::Options empty_mode;
+        empty_mode.request_display_mode=[](std::string){return std::string();};
+        AxMCPAppBridge empty_host(client,tool_name,empty_mode);
+        empty_host.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+        if(!value_has(empty_host.handle_view_message(object({{"jsonrpc","2.0"},{"id","mode-empty"},{"method","ui/request-display-mode"},{"params",object({{"mode","pip"}})}})),"error"))throw AxError("fixture","host granted an empty display mode and it was accepted");
+        // A mode the host is entitled to grant still works, and the host's
+        // answer wins over the frame's request.
+        auto granted=host.handle_view_message(object({{"jsonrpc","2.0"},{"id","mode-ok"},{"method","ui/request-display-mode"},{"params",object({{"mode","inline"}})}}));
+        (void)granted;
+      }
+      {
+        // 2. A request carrying an explicit null id is still a request, and
+        // its envelope has to carry that null id rather than dropping the
+        // key: a frame matching replies by id cannot match a reply with no
+        // id at all.
+        auto null_id=bridge.handle_view_message(Core::json_parse("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ui/mystery\"}"));
+        if(!value_has(null_id,"error"))throw AxError("fixture","a null-id App request was not answered");
+        if(!value_has(null_id,"id"))throw AxError("fixture","a null-id App response dropped its id");
+        if(!Core::get(null_id,"id",Value("sentinel")).is_null())throw AxError("fixture","a null-id App response changed its id");
+        if(display(Core::json_stringify(null_id)).find("\"id\":null")==std::string::npos)throw AxError("fixture","a null-id App response did not serialize its id");
+      }
+      {
+        // 3. A host callback that fails inside a request becomes that
+        // request's error response, because the frame is waiting for one. The
+        // same failure in a notification propagates to the host instead,
+        // because there is no response to carry it.
+        AxMCPAppBridge::Options failing;
+        failing.open_link=[](std::string){throw AxError("mcp","host link callback failed");};
+        failing.size_changed=[](Value){throw AxError("mcp","host size callback failed");};
+        AxMCPAppBridge host(client,tool_name,failing);
+        host.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+        auto answer=host.handle_view_message(object({{"jsonrpc","2.0"},{"id","link-fail"},{"method","ui/open-link"},{"params",object({{"url","https://example.com"}})}}));
+        if(!value_has(answer,"error"))throw AxError("fixture","a failing host callback was reported as success");
+        if(display(Core::get(Core::get(answer,"error",Value::object()),"code",0))!="-32000")throw AxError("fixture","a failing host callback used the wrong error code");
+        if(display(Core::get(Core::get(answer,"error",Value::object()),"message",""))!="host link callback failed")throw AxError("fixture","a failing host callback lost its message");
+        bool propagated=false;
+        try{host.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/size-changed"},{"params",object({{"width",1.0},{"height",2.0}})}}));}
+        catch(const AxError& error){propagated=std::string(error.what())=="host size callback failed";}
+        if(!propagated)throw AxError("fixture","a failing host callback in a notification did not reach the host");
+      }
+      {
+        // 4. Teardown lifecycle when the host's own delivery fails. The
+        // reference consumes the request id and leaves the App initialized,
+        // because the teardown was never delivered, and lets the failure
+        // reach the host. Swallowing it would leave the host believing a
+        // frame was torn down that is still live.
+        int sends=0;
+        AxMCPAppBridge::Options failing;
+        failing.send_to_view=[&](Value){++sends;throw AxError("mcp","host view transport failed");};
+        AxMCPAppBridge host(client,tool_name,failing);
+        host.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+        bool propagated=false;
+        try{host.teardown("navigated away");}
+        catch(const AxError& error){propagated=std::string(error.what())=="host view transport failed";}
+        if(!propagated)throw AxError("fixture","a failing teardown delivery was swallowed");
+        if(sends!=1)throw AxError("fixture","teardown did not attempt delivery exactly once");
+        if(!host.initialized())throw AxError("fixture","teardown dropped initialization without delivering");
+        // The id was consumed by the failed attempt, so a later teardown
+        // uses the next one rather than reusing it.
+        std::vector<Value> delivered;
+        AxMCPAppBridge::Options working;
+        working.send_to_view=[&](Value message){delivered.push_back(message);};
+        AxMCPAppBridge counted(client,tool_name,working);
+        counted.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+        counted.teardown("first");
+        counted.handle_view_message(object({{"jsonrpc","2.0"},{"method","ui/notifications/initialized"}}));
+        counted.teardown("second");
+        if(delivered.size()!=2)throw AxError("fixture","teardown delivery count mismatch");
+        if(static_cast<long>(Core::number(Core::get(delivered[0],"id",0)))!=1||static_cast<long>(Core::number(Core::get(delivered[1],"id",0)))!=2)throw AxError("fixture","teardown reused a request id");
+        if(counted.initialized())throw AxError("fixture","a delivered teardown left the App initialized");
+      }
     } else if(op=="mrtr_elicitation"){expect_subset_local(client.call_tool("work",object({{"value",1}})),Core::get(fixture,"expected_result",Value::object()),"MRTR elicitation result");if(elicitation_calls!=1)throw AxError("fixture","MRTR elicitation handler count mismatch");expect_subset_local(elicitation_params,Core::get(fixture,"expected_elicitation_params",Value::object()),"MRTR elicitation params");expect_subset_local(elicitation_context,Core::get(fixture,"expected_context",Value::object()),"MRTR elicitation context");std::vector<Value> tool_calls;for(auto request:transport->requests)if(display(Core::get(request,"method",""))=="tools/call")tool_calls.push_back(request);auto expected_calls=as_array_local(Core::get(fixture,"expected_call_params",Value::array()));for(size_t index=0;index<expected_calls.size();++index)expect_subset_local(Core::get(tool_calls[index],"params",Value::object()),expected_calls[index],"MRTR elicitation call params");auto capabilities=Core::get(Core::get(Core::get(transport->requests.front(),"params",Value::object()),"_meta",Value::object()),"io.modelcontextprotocol/clientCapabilities",Value::object());if(!value_has(capabilities,"elicitation")||value_has(capabilities,"sampling"))throw AxError("fixture","dishonest MRTR capabilities");auto bad_transport=std::make_shared<AxMCPScriptedTransport>(Value::array());AxMCPClient bad(bad_transport,object({{"era","modern"},{"sampling",true}}));try{bad.init();throw AxError("fixture","truthy sampling option was accepted");}catch(const AxError& error){if(std::string(error.what()).find("sampling is not supported")==std::string::npos)throw;}
     } else if(op=="mrtr_roots"){expect_subset_local(client.call_tool("work",object({{"value",1}})),Core::get(fixture,"expected_call_result",Value::object()),"MRTR tool result");expect_subset_local(client.get_prompt("ask",Value::object()),Core::get(fixture,"expected_prompt_result",Value::object()),"MRTR prompt result");expect_subset_local(client.read_resource("file:///resource"),Core::get(fixture,"expected_resource_result",Value::object()),"MRTR resource result");Array methods;std::vector<Value> tool_calls;std::set<std::string> ids;for(auto request:transport->requests){auto method=display(Core::get(request,"method",""));methods.push_back(method);if(method=="tools/call"){tool_calls.push_back(request);auto id=display(Core::get(request,"id",""));if(!ids.insert(id).second)throw AxError("fixture","MRTR rounds reused a request id");}}if(display(Core::json_stringify(Value(methods)))!=display(Core::json_stringify(Core::get(fixture,"expected_methods",Value::array()))))throw AxError("fixture","MRTR request methods mismatch");auto expected_params=as_array_local(Core::get(fixture,"expected_tool_call_params",Value::array()));for(size_t index=0;index<expected_params.size();++index){auto expected=expected_params[index];auto params=Core::get(tool_calls[index],"params",Value::object());expect_subset_local(params,expected,"MRTR tool params");if(!value_has(expected,"inputResponses")){if(value_has(params,"inputResponses")||value_has(params,"requestState"))throw AxError("fixture","initial MRTR request included round state");}else{auto actual_responses=as_object_local(Core::get(params,"inputResponses",Value::object()));auto wanted_responses=as_object_local(Core::get(expected,"inputResponses",Value::object()));if(actual_responses.size()!=wanted_responses.size())throw AxError("fixture","MRTR request retained stale input responses");for(const auto& item:wanted_responses)if(!value_has(Core::get(params,"inputResponses",Value::object()),item.first))throw AxError("fixture","MRTR request retained stale input responses");}if(!value_has(expected,"requestState")&&value_has(params,"requestState"))throw AxError("fixture","MRTR request retained stale requestState");}
     } else if(op=="subscriptions_listen"){for(auto item:as_array_local(Core::get(fixture,"semantic_cases",Value::array()))){auto actual=Core::mcp_listen_interests(Core::get(item,"subscribed_uris",Value::array()),Core::get(item,"filters",Value::object()),Core::get(item,"task_ids",Value()));if(!equal(actual,Core::get(item,"expected",Value::object())))throw AxError("fixture","listen interests mismatch");}std::vector<Value> delivered;client.add_notification_listener([&](Value message){delivered.push_back(message);});client.start_listening();if(transport->request_streams.size()!=1)throw AxError("fixture","initial subscriptions/listen stream missing");auto first=transport->request_streams.front();expect_subset_local(Core::get(Core::get(first,"params",Value::object()),"notifications",Value::object()),Core::get(fixture,"expected_first_notifications",Value::object()),"initial listen interests");client.acquire_resource_subscription(display(Core::get(fixture,"uri","")),"fixture");if(transport->request_streams.size()!=static_cast<size_t>(Core::number(Core::get(fixture,"expected_stream_count",0))))throw AxError("fixture","subscription interest change did not restart request stream");auto second=transport->request_streams.back();if(equal(Core::get(first,"id",Value()),Core::get(second,"id",Value())))throw AxError("fixture","subscriptions/listen restart reused its request id");expect_subset_local(Core::get(Core::get(second,"params",Value::object()),"notifications",Value::object()),Core::get(fixture,"expected_second_notifications",Value::object()),"updated listen interests");auto count_updates=[&](){return std::count_if(delivered.begin(),delivered.end(),[](const Value& item){return display(Core::get(item,"method",""))=="notifications/resources/updated";});};auto before=count_updates();auto notification=Core::json_parse(Core::json_stringify(Core::get(fixture,"delivered_notification",Value::object())));auto params=Core::get(notification,"params",Value::object());Core::set(params,"_meta",object({{"io.modelcontextprotocol/subscriptionId","other"}}));Core::set(notification,"params",params);transport->emit(notification);if(count_updates()!=before)throw AxError("fixture","cross-subscription notification was delivered");auto meta=Core::get(params,"_meta",Value::object());Core::set(meta,"io.modelcontextprotocol/subscriptionId",Core::get(second,"id",Value()));Core::set(params,"_meta",meta);Core::set(notification,"params",params);transport->emit(notification);if(count_updates()!=before+1)throw AxError("fixture","active subscription notification was not delivered");if(value_has(Core::get(delivered.back(),"params",Value::object()),"_meta"))throw AxError("fixture","subscription id leaked to notification consumer");for(auto forbidden:as_array_local(Core::get(fixture,"expected_forbidden_methods",Value::array())))for(auto request:transport->requests)if(display(Core::get(request,"method",""))==display(forbidden))throw AxError("fixture","modern subscription emitted legacy method");

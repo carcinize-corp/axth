@@ -9,11 +9,38 @@ TypeScript runtime and write small conformance fixtures under `ir/conformance/`.
 The compiler source of truth is the `.axir` bundle under `ir/axcore/`, plus the
 fixtures and specs under `ir/spec/`.
 
-The experimental [Common Lisp package](../packages/lisp/README.md) uses a
-separate `tools/axir/cmd/lisp-core` emitter for signatures and JSON Schema.
-It follows the Core dependency closure and tests the shared fixtures directly.
-It is not in the default full-backend verification matrix. Its native provider,
-generation, tool, and Jiti code has a separate Common Lisp CI workflow.
+The [Common Lisp package](../packages/lisp/README.md) uses a separate
+`tools/axir/cmd/lisp-core` emitter, which follows the Core dependency closure
+across signatures, schema, prompts, providers, generators, agents, flows,
+programs and MCP, and tests the shared fixtures directly. Lisp is included in
+default verification. Its declaration in `packages/lisp/axir-conformance.json`
+names the suites, native boundaries, runtime profile, and no-key examples.
+Verification rejects missing fixture receipts, failed examples, and missing dependencies.
+The Common Lisp CI workflow also compiles public snippets and tests the Jiti adapter.
+
+Its public examples are in the shared catalog, so the same CLI runs them:
+
+```bash
+npm run example -- lisp src/examples/lisp/flows/flow-openai.lisp
+npm run example -- lisp src/examples/lisp/flows/flow-openai.lisp --compile-only
+npm run example:lisp src/examples/lisp/optimization/gepa-instructions.lisp
+```
+
+The runner puts `packages/lisp` on ASDF's registry, loads the `axllm` system,
+and then loads the example. The compiler generates Core and metadata in place
+while preserving the native Lisp sources.
+`--compile-only` compiles the example with every warning fatal, which is how an
+example that names an API the port does not implement is caught without a
+provider call. `AX_LISP_PACKAGE_DIR` points the runner at another checkout of
+the package, which is what makes an example verifiable against an integrated
+tree before that tree is committed.
+
+The language declares the shared required example groups --- `generation`,
+`short-agents`, `flows`, `optimization` and `audio` --- plus `mcp`, at three
+levels each. Audio runs through the `ax-speak` and `ax-transcribe` generics on
+the service, and through a signature's `:audio` output field with the
+`renderAudio` forward option. The claim is per language in
+`scripts/example-catalog.mjs`.
 
 ## Astra Session Implementation Status
 

@@ -644,6 +644,7 @@ const languageLabels = {
   cpp: 'C++',
   go: 'Go',
   java: 'Java',
+  lisp: 'Common Lisp',
   python: 'Python',
   rust: 'Rust',
   typescript: 'TypeScript',
@@ -803,6 +804,7 @@ function queryLanguageIntent(query) {
   const fragments = queryFragments(query);
 
   if (raw.includes('c++') || fragments.includes('cpp')) return 'cpp';
+  if (raw.includes('common lisp')) return 'lisp';
   if (raw.includes('@ax-llm/ax')) return 'typescript';
   if (raw.includes('github.com/ax-llm/ax')) return 'go';
   if (raw.includes('com.axllm')) return 'java';
@@ -810,6 +812,13 @@ function queryLanguageIntent(query) {
   if (fragments.includes('python')) return 'python';
   if (fragments.includes('java')) return 'java';
   if (fragments.includes('rust')) return 'rust';
+  if (
+    fragments.includes('lisp') ||
+    fragments.includes('sbcl') ||
+    fragments.includes('asdf')
+  ) {
+    return 'lisp';
+  }
   if (fragments.includes('golang')) return 'go';
   if (fragments[0] === 'go') return 'go';
 

@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+func TestPythonNamesEscapeKeywordsWithoutCollisions(t *testing.T) {
+	for input, want := range map[string]string{
+		"%class": "_ax_keyword_class", "%from": "_ax_keyword_from",
+		"%True": "_ax_keyword_True", "%__debug__": "_ax_keyword___debug__",
+		"%class_": "class_", "%name": "name",
+		"%_ax_keyword_class": "_ax_keyword__ax_keyword_class",
+	} {
+		if got := pyName(input); got != want {
+			t.Errorf("pyName(%q) = %q, want %q", input, got, want)
+		}
+		if got := pythonLiteral(input); got != want {
+			t.Errorf("pythonLiteral(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 // TestPythonModuleMissingHelpers exercises the codegen-time guard that prevents
 // a generated Python module from calling an underscore helper it never defines
 // or imports (which would otherwise be a runtime NameError, since Python has no

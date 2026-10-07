@@ -8,8 +8,9 @@
 (asdf:load-system "image-agent/store")
 
 (defun request-observation (request)
-  (let* ((messages (ax:jget request "messages"))
-         (content (ax:jget (aref messages 1) "content"))
+  (let* ((messages (ax:jget request "input"))
+         (parts (ax:jget (aref messages 0) "content"))
+         (content (ax:jget (aref parts 0) "text"))
          (prefix "Observation: "))
     (assert (and (>= (length content) (length prefix))
                  (string= prefix content :end2 (length prefix))))
@@ -22,7 +23,9 @@
                                     (lambda () (= 7 (gethash :x (image-agent:reference-table world))))))))
        (calls 0)
        (client
-         (ax:ai :name "openai" :model "gpt-6-luna" :api-key "test-only"
+         ;; The scripted wire response below is Responses dialect. Pin its
+         ;; profile so a model-catalog change cannot silently reinterpret it.
+         (ax:ai :name "openai-responses" :model "gpt-6-luna" :api-key "test-only"
                 :transport
                 (lambda (url headers body)
                   (declare (ignore url headers))
@@ -43,10 +46,11 @@
                     (assert (equal "gpt-6-luna" (ax:jget request "model")))
                     (values
                      (ax:encode-json
-                      (ax:object "choices"
-                                 (vector (ax:object "finish_reason" "stop" "message"
-                                                    (ax:object "role" "assistant" "content" text)))
-                                 "usage" (ax:object "prompt_tokens" 9 "completion_tokens" 4)))
+                      (ax:object "status" "completed" "output"
+                                 (vector (ax:object "type" "message" "role" "assistant"
+                                                   "content" (vector (ax:object "type" "output_text"
+                                                                                 "text" text))))
+                                 "usage" (ax:object "input_tokens" 9 "output_tokens" 4)))
                      200)))))
        (propose (ax:make-jiti-proposer client :observation-limit 80)))
   (unwind-protect

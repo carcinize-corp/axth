@@ -2885,18 +2885,21 @@ def _flow_mermaid_render_ast(ast: Any, options: Any) -> str:
     header = _core_string_format("flowchart {}", direction)
     lines.append(header)
     directives = _core_get(ast, "directives", None)
-    directive_order = _core_get(ast, "directiveOrder", None)
+    order = _core_get(ast, "order", None)
     percent = _core_get(ast, "percent", "")
-    for id in directive_order:
-        signature_text = _core_get(directives, id, None)
-        signature = parse_signature(signature_text)
-        canonical = signature_to_string(signature)
-        prefix = _core_string_format("{}{}ax", percent, percent)
-        directive = _core_string_format("  {} {}: {}", prefix, id, canonical)
-        lines.append(directive)
+    for id in order:
+        has_directive = _core_map_contains(directives, id)
+        if has_directive:
+            signature_text = _core_get(directives, id, None)
+            signature = parse_signature(signature_text)
+            canonical = signature_to_string(signature)
+            prefix = _core_string_format("{}{}ax", percent, percent)
+            directive = _core_string_format("  {} {}: {}", prefix, id, canonical)
+            lines.append(directive)
+        else:
+            pass
     lines.append("")
     nodes = _core_get(ast, "nodes", None)
-    order = _core_get(ast, "order", None)
     compile_order = _core_get(ast, "compileOrder", order)
     order_index = _core_get(ast, "orderIndex", None)
     edges = _core_get(ast, "edges", None)

@@ -1,0 +1,15 @@
+# WebSocket client source overlay; repo and immutable commit, no Quicklisp drift.
+# websocket-driver, fast-websocket, event-emitter, proc-parse, xsubseq: BSD-2-Clause.
+# bordeaux-threads, fast-io, static-vectors, fast-http: MIT.
+# smart-buffer: BSD-3-Clause. sha1: Apache-2.0.
+fukamachi/websocket-driver 137e3132075996b4b21874dad50a02e28aacc64c
+sionescu/bordeaux-threads 21619023facf4709b58d240af816f3f7b488d2f6
+rpav/fast-io a4c5ad600425842e8b6233b1fa22610ffcd874c3
+sionescu/static-vectors 3d9d89b4950b72e0e5bdacfcdfd366bde72386d2
+fukamachi/fast-websocket 66ea86617edc07d8753ed91a5558e176318be92f
+fukamachi/fast-http 03d440dbf5aca1c791be6c3ee15b30f0e75d6968
+fukamachi/event-emitter d8bd3d9300004185fd8d11261ea6a909e8a75ff8
+fukamachi/proc-parse 3afe2b76f42f481f44a0a495256f7abeb69cef27
+fukamachi/xsubseq 5ce430b3da5cda3a73b9cf5cee4df2843034422b
+fukamachi/smart-buffer 619759d8a6f821773bbc65c0bda553d30e51e6f3
+massung/sha1 be8b1b155c3a6ad3eb9b200212af6ff52f5611de

@@ -4,7 +4,7 @@ import os
 import copy
 import re
 from typing import Any
-from .signature import _js_date_millis, _js_number_text, _js_format
+from .signature import _js_date_millis, _js_number_text, _js_format, _js_json_dumps, _js_text
 from .signature import (
     _signature_describe_field_values_impl,
 )
@@ -181,6 +181,14 @@ def _core_string_format(template, *args):
     return _js_format(template, args)
 
 
+def _core_string_str(value):
+    return _js_text(value)
+
+
+def _core_json_stringify(value):
+    return _js_json_dumps(value)
+
+
 def _core_description_append(base, hint):
     if not hint or not str(hint).strip():
         return base
@@ -329,55 +337,102 @@ def _schema_flexible_json_as_string_impl(typ: FieldType, options: Any) -> bool:
     return as_string
 
 
-def strip_internal(fields: list[Any], values: Any) -> Any:
-    _core_coverage_mark("strip_internal")
-    public_values = _strip_internal_fields_impl(fields, values)
-    return public_values
-
-
-def _validate_fields_impl(fields: list[Any], values: Any, context: str) -> None:
-    _core_coverage_mark("_validate_fields_impl")
-    values_is_object = _core_type_is(values, "object")
-    values_not_object = _core_not(values_is_object)
-    if values_not_object:
-        message = _core_string_format("{} must be an object", context)
-        error = _core_validation_error(message)
-        raise error
+def _prompt_value_matches_type(name: str, value: Any) -> bool:
+    _core_coverage_mark("_prompt_value_matches_type")
+    string = _core_eq(name, "string")
+    code = _core_eq(name, "code")
+    _ax_keyword_class = _core_eq(name, "class")
+    text_type = _core_or(string, code)
+    string_type = _core_or(text_type, _ax_keyword_class)
+    if string_type:
+        valid = _core_type_is(value, "string")
+        return valid
     else:
         pass
-    for field in fields:
-        field_name = _core_get(field, "name", None)
-        field_title = _core_get(field, "title", field_name)
-        has_title = _core_truthy(field_title)
-        if has_title:
+    number_type = _core_eq(name, "number")
+    if number_type:
+        valid = _core_type_is(value, "number")
+        return valid
+    else:
+        pass
+    boolean_type = _core_eq(name, "boolean")
+    if boolean_type:
+        valid = _core_type_is(value, "boolean")
+        return valid
+    else:
+        pass
+    date_name = _core_eq(name, "date")
+    datetime_name = _core_eq(name, "datetime")
+    date_type = _core_or(date_name, datetime_name)
+    if date_type:
+        text = _core_type_is(value, "string")
+        date = _core_type_is(value, "date")
+        valid = _core_or(text, date)
+        return valid
+    else:
+        pass
+    date_range = _core_eq(name, "dateRange")
+    datetime_range = _core_eq(name, "datetimeRange")
+    range_type = _core_or(date_range, datetime_range)
+    if range_type:
+        text = _core_type_is(value, "string")
+        if text:
+            return True
+        else:
             pass
+        object = _core_type_is(value, "object")
+        if object:
+            start = _core_map_contains(value, "start")
+            end = _core_map_contains(value, "end")
+            valid = _core_and(start, end)
+            return valid
         else:
-            field_title = field_name
-        is_optional = _core_get(field, "is_optional", False)
-        has_value = _core_map_contains(values, field_name)
-        missing = _core_not(has_value)
-        field_value = _core_get(values, field_name, None)
-        is_null = _core_is_none(field_value)
-        missing_or_null = _core_or(missing, is_null)
-        if missing_or_null:
-            required_missing = _core_not(is_optional)
-            if required_missing:
-                is_input = _core_eq(context, "input")
-                if is_input:
-                    input_message = _core_string_format("Value for input field '{}' is required.", field_name)
-                    input_error = _core_validation_error(input_message)
-                    raise input_error
-                else:
-                    pass
-                message = _core_string_format("Required field is missing: '{}'", field_title)
-                error = _core_validation_error(message)
-                raise error
-            else:
-                pass
-        else:
-            child_path = _core_string_format("{}.{}", context, field_name)
-            _validate_value_impl(field, field_value, child_path)
-    return None
+            pass
+        return False
+    else:
+        pass
+    json_type = _core_eq(name, "json")
+    object_type = _core_eq(name, "object")
+    structured_type = _core_or(json_type, object_type)
+    if structured_type:
+        object = _core_type_is(value, "object")
+        list = _core_type_is(value, "list")
+        date = _core_type_is(value, "date")
+        null = _core_is_none(value)
+        text = _core_type_is(value, "string")
+        json_text = _core_and(json_type, text)
+        collection = _core_or(object, list)
+        special_object = _core_or(date, null)
+        any_object = _core_or(collection, special_object)
+        valid = _core_or(any_object, json_text)
+        return valid
+    else:
+        pass
+    image = _core_eq(name, "image")
+    if image:
+        valid = _valid_image(value)
+        return valid
+    else:
+        pass
+    audio = _core_eq(name, "audio")
+    if audio:
+        valid = _valid_audio(value)
+        return valid
+    else:
+        pass
+    file = _core_eq(name, "file")
+    if file:
+        valid = _valid_file(value)
+        return valid
+    else:
+        pass
+    url = _core_eq(name, "url")
+    if url:
+        valid = _valid_url_shape(value)
+        return valid
+    else:
+        pass
+    return False
 
 
 def _schema_json_type_impl(type_name: str) -> Any:
@@ -542,127 +597,124 @@ def _schema_enhance_description_impl(base: Any, typ: FieldType) -> Any:
     return base
 
 
-def _validate_output_impl(fields: list[Any], values: Any) -> Any:
-    _core_coverage_mark("_validate_output_impl")
-    normalized = values
+def validate_prompt_value(field: Field, value: Any) -> None:
+    _core_coverage_mark("validate_prompt_value")
+    type = _core_get(field, "type", None)
+    name = _core_get(type, "name", "string")
+    array = _core_get(type, "is_array", False)
+    media_types = {}
+    media_types["image"] = "object ({ mimeType: string; data: string })"
+    media_types["audio"] = "string or object ({ data: string; format?: string })"
+    media_types["file"] = "object ({ mimeType: string; data: string } | { mimeType: string; fileUri: string })"
+    media_types["url"] = "string or object ({ url: string; title?: string; description?: string })"
+    media = _core_map_contains(media_types, name)
+    list = _core_type_is(value, "list")
+    valid = True
+    accept_array = _core_or(array, media)
+    check_items = _core_and(list, accept_array)
+    if check_items:
+        for item in value:
+            item_valid = _prompt_value_matches_type(name, item)
+            valid = _core_and(valid, item_valid)
+    else:
+        not_media = _core_not(media)
+        requires_array = _core_and(array, not_media)
+        if requires_array:
+            valid = False
+        else:
+            valid = _prompt_value_matches_type(name, value)
+    if valid:
+        return None
+    else:
+        pass
+    field_name = _core_get(field, "name", None)
+    if media:
+        expected = _core_get(media_types, name, None)
+        text = _core_string_str(value)
+        message = _core_string_format("Validation failed: Expected '{}' to be type '{}' instead got '{}'", field_name, expected, text)
+        error = _core_validation_error(message)
+        raise error
+    else:
+        pass
+    got = "object"
+    text = _core_type_is(value, "string")
+    if text:
+        got = "string"
+    else:
+        pass
+    number = _core_type_is(value, "number")
+    if number:
+        got = "number"
+    else:
+        pass
+    boolean = _core_type_is(value, "boolean")
+    if boolean:
+        got = "boolean"
+    else:
+        pass
+    if list:
+        got = "array"
+    else:
+        pass
+    prefix = ""
+    if array:
+        prefix = "an array of "
+    else:
+        pass
+    encoded = _core_json_stringify(value)
+    message = _core_string_format("Validation failed: Expected '{}' to be a {}{} instead got '{}' ({})", field_name, prefix, name, got, encoded)
+    error = _core_validation_error(message)
+    raise error
+
+
+def strip_internal(fields: list[Any], values: Any) -> Any:
+    _core_coverage_mark("strip_internal")
+    public_values = _strip_internal_fields_impl(fields, values)
+    return public_values
+
+
+def _validate_fields_impl(fields: list[Any], values: Any, context: str) -> None:
+    _core_coverage_mark("_validate_fields_impl")
+    values_is_object = _core_type_is(values, "object")
+    values_not_object = _core_not(values_is_object)
+    if values_not_object:
+        message = _core_string_format("{} must be an object", context)
+        error = _core_validation_error(message)
+        raise error
+    else:
+        pass
     for field in fields:
         field_name = _core_get(field, "name", None)
-        field_title = _core_get(field, "title", None)
-        has_name = _core_map_contains(normalized, field_name)
-        missing_name = _core_not(has_name)
-        has_title = _core_map_contains(normalized, field_title)
-        alias_title = _core_and(missing_name, has_title)
-        if alias_title:
-            title_value = _core_get(normalized, field_title, None)
-            normalized[field_name] = title_value
-        else:
+        field_title = _core_get(field, "title", field_name)
+        has_title = _core_truthy(field_title)
+        if has_title:
             pass
-    _validate_fields_impl(fields, normalized, "output")
-    return normalized
-
-
-def _validate_string_constraints_impl(value: str, field: Field) -> None:
-    _core_coverage_mark("_validate_string_constraints_impl")
-    typ = _core_get(field, "type", None)
-    title = _core_get(field, "title", None)
-    units = _core_string_utf16_units(value)
-    length = _core_len(units)
-    min_length = _core_get(typ, "min_length", None)
-    has_min = _core_is_not_none(min_length)
-    if has_min:
-        too_short = _core_lt(length, min_length)
-        if too_short:
-            message = _core_string_format("Field '{}' failed validation: String must be at least {} characters long. You provided: \"{}\" ({} characters).", title, min_length, value, length)
-            error = _core_validation_error(message)
-            raise error
         else:
-            pass
-    else:
-        pass
-    max_length = _core_get(typ, "max_length", None)
-    has_max = _core_is_not_none(max_length)
-    if has_max:
-        too_long = _core_gt(length, max_length)
-        if too_long:
-            message = _core_string_format("Field '{}' failed validation: String must be at most {} characters long. You provided: \"{}\" ({} characters).", title, max_length, value, length)
-            error = _core_validation_error(message)
-            raise error
+            field_title = field_name
+        is_optional = _core_get(field, "is_optional", False)
+        has_value = _core_map_contains(values, field_name)
+        missing = _core_not(has_value)
+        field_value = _core_get(values, field_name, None)
+        is_null = _core_is_none(field_value)
+        missing_or_null = _core_or(missing, is_null)
+        if missing_or_null:
+            required_missing = _core_not(is_optional)
+            if required_missing:
+                is_input = _core_eq(context, "input")
+                if is_input:
+                    input_message = _core_string_format("Value for input field '{}' is required.", field_name)
+                    input_error = _core_validation_error(input_message)
+                    raise input_error
+                else:
+                    pass
+                message = _core_string_format("Required field is missing: '{}'", field_title)
+                error = _core_validation_error(message)
+                raise error
+            else:
+                pass
         else:
-            pass
-    else:
-        pass
-    pattern = _core_get(typ, "pattern", None)
-    has_pattern = _core_is_not_none(pattern)
-    if has_pattern:
-        matches = _core_regex_match(pattern, value)
-        pattern_failed = _core_not(matches)
-        if pattern_failed:
-            message = _core_string_format("Field '{}' failed validation: String must match pattern /{}/. You provided: \"{}\".", title, pattern, value)
-            error = _core_validation_error(message)
-            raise error
-        else:
-            pass
-    else:
-        pass
-    format = _core_get(typ, "format", None)
-    is_email = _core_eq(format, "email")
-    if is_email:
-        valid_email = _core_regex_match("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", value)
-        invalid_email = _core_not(valid_email)
-        if invalid_email:
-            message = _core_string_format("Field '{}' failed validation: String must be a valid email address. You provided: \"{}\".", title, value)
-            error = _core_validation_error(message)
-            raise error
-        else:
-            pass
-    else:
-        pass
-    url_formats = []
-    url_formats.append("uri")
-    url_formats.append("url")
-    is_url_format = _core_contains(url_formats, format)
-    if is_url_format:
-        valid_url = _core_url_valid(value)
-        invalid_url = _core_not(valid_url)
-        if invalid_url:
-            message = _core_string_format("Field '{}' failed validation: String must be a valid URL. You provided: \"{}\".", title, value)
-            error = _core_validation_error(message)
-            raise error
-        else:
-            pass
-    else:
-        pass
-    return None
-
-
-def _validate_number_constraints_impl(value: float, field: Field) -> None:
-    _core_coverage_mark("_validate_number_constraints_impl")
-    typ = _core_get(field, "type", None)
-    title = _core_get(field, "title", None)
-    minimum = _core_get(typ, "minimum", None)
-    has_minimum = _core_is_not_none(minimum)
-    if has_minimum:
-        too_small = _core_lt(value, minimum)
-        if too_small:
-            message = _core_string_format("Field '{}' failed validation: Number must be at least {}. You provided: {}.", title, minimum, value)
-            error = _core_validation_error(message)
-            raise error
-        else:
-            pass
-    else:
-        pass
-    maximum = _core_get(typ, "maximum", None)
-    has_maximum = _core_is_not_none(maximum)
-    if has_maximum:
-        too_large = _core_gt(value, maximum)
-        if too_large:
-            message = _core_string_format("Field '{}' failed validation: Number must be at most {}. You provided: {}.", title, maximum, value)
-            error = _core_validation_error(message)
-            raise error
-        else:
-            pass
-    else:
-        pass
+            child_path = _core_string_format("{}.{}", context, field_name)
+            _validate_value_impl(field, field_value, child_path)
     return None
 
 
@@ -740,6 +792,317 @@ def _schema_apply_constraints_impl(schema: Any, typ: FieldType) -> Any:
         else:
             pass
     return schema
+
+
+def _validate_output_impl(fields: list[Any], values: Any) -> Any:
+    _core_coverage_mark("_validate_output_impl")
+    normalized = values
+    for field in fields:
+        field_name = _core_get(field, "name", None)
+        field_title = _core_get(field, "title", None)
+        has_name = _core_map_contains(normalized, field_name)
+        missing_name = _core_not(has_name)
+        has_title = _core_map_contains(normalized, field_title)
+        alias_title = _core_and(missing_name, has_title)
+        if alias_title:
+            title_value = _core_get(normalized, field_title, None)
+            normalized[field_name] = title_value
+        else:
+            pass
+    _validate_fields_impl(fields, normalized, "output")
+    return normalized
+
+
+def _schema_nullable_optional_impl(schema: Any, field: Field, options: Any) -> Any:
+    _core_coverage_mark("_schema_nullable_optional_impl")
+    is_optional = _core_get(field, "is_optional", False)
+    strict_camel = _core_get(options, "strictStructuredOutputs", False)
+    strict_snake = _core_get(options, "strict_structured_outputs", False)
+    strict = _core_or(strict_camel, strict_snake)
+    make_nullable = _core_and(is_optional, strict)
+    if make_nullable:
+        schema_type = _core_get(schema, "type", None)
+        type_is_list = _core_type_is(schema_type, "list")
+        if type_is_list:
+            has_null_type = _core_contains(schema_type, "null")
+            needs_null_type = _core_not(has_null_type)
+            if needs_null_type:
+                schema_type.append("null")
+            else:
+                pass
+        else:
+            nullable_type = []
+            nullable_type.append(schema_type)
+            nullable_type.append("null")
+            schema["type"] = nullable_type
+        enum_values = _core_get(schema, "enum", None)
+        enum_is_list = _core_type_is(enum_values, "list")
+        if enum_is_list:
+            none = _core_none()
+            enum_has_null = _core_contains(enum_values, none)
+            enum_needs_null = _core_not(enum_has_null)
+            if enum_needs_null:
+                enum_values.append(none)
+            else:
+                pass
+        else:
+            pass
+    else:
+        pass
+    return schema
+
+
+def _validate_string_constraints_impl(value: str, field: Field) -> None:
+    _core_coverage_mark("_validate_string_constraints_impl")
+    typ = _core_get(field, "type", None)
+    title = _core_get(field, "title", None)
+    units = _core_string_utf16_units(value)
+    length = _core_len(units)
+    min_length = _core_get(typ, "min_length", None)
+    has_min = _core_is_not_none(min_length)
+    if has_min:
+        too_short = _core_lt(length, min_length)
+        if too_short:
+            message = _core_string_format("Field '{}' failed validation: String must be at least {} characters long. You provided: \"{}\" ({} characters).", title, min_length, value, length)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    max_length = _core_get(typ, "max_length", None)
+    has_max = _core_is_not_none(max_length)
+    if has_max:
+        too_long = _core_gt(length, max_length)
+        if too_long:
+            message = _core_string_format("Field '{}' failed validation: String must be at most {} characters long. You provided: \"{}\" ({} characters).", title, max_length, value, length)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    pattern = _core_get(typ, "pattern", None)
+    has_pattern = _core_is_not_none(pattern)
+    if has_pattern:
+        matches = _core_regex_match(pattern, value)
+        pattern_failed = _core_not(matches)
+        if pattern_failed:
+            message = _core_string_format("Field '{}' failed validation: String must match pattern /{}/. You provided: \"{}\".", title, pattern, value)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    format = _core_get(typ, "format", None)
+    is_email = _core_eq(format, "email")
+    if is_email:
+        valid_email = _core_regex_match("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", value)
+        invalid_email = _core_not(valid_email)
+        if invalid_email:
+            message = _core_string_format("Field '{}' failed validation: String must be a valid email address. You provided: \"{}\".", title, value)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    url_formats = []
+    url_formats.append("uri")
+    url_formats.append("url")
+    is_url_format = _core_contains(url_formats, format)
+    if is_url_format:
+        valid_url = _core_url_valid(value)
+        invalid_url = _core_not(valid_url)
+        if invalid_url:
+            message = _core_string_format("Field '{}' failed validation: String must be a valid URL. You provided: \"{}\".", title, value)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    return None
+
+
+def _schema_object_from_fields_impl(fields_map: Any, is_nested: bool, options: Any) -> Any:
+    _core_coverage_mark("_schema_object_from_fields_impl")
+    schema = {}
+    properties = {}
+    required = []
+    schema["type"] = "object"
+    schema["properties"] = properties
+    schema["required"] = required
+    schema["additionalProperties"] = False
+    fields = _core_fields_from_map(fields_map)
+    for field in fields:
+        is_internal = _core_get(field, "is_internal", False)
+        include = _core_not(is_internal)
+        if include:
+            field_name = _core_get(field, "name", None)
+            field_schema = _schema_field_schema_impl(field, is_nested, options)
+            properties[field_name] = field_schema
+            is_required = _schema_required_impl(field, options)
+            if is_required:
+                required.append(field_name)
+            else:
+                pass
+        else:
+            pass
+    return schema
+
+
+def _validate_number_constraints_impl(value: float, field: Field) -> None:
+    _core_coverage_mark("_validate_number_constraints_impl")
+    typ = _core_get(field, "type", None)
+    title = _core_get(field, "title", None)
+    minimum = _core_get(typ, "minimum", None)
+    has_minimum = _core_is_not_none(minimum)
+    if has_minimum:
+        too_small = _core_lt(value, minimum)
+        if too_small:
+            message = _core_string_format("Field '{}' failed validation: Number must be at least {}. You provided: {}.", title, minimum, value)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    maximum = _core_get(typ, "maximum", None)
+    has_maximum = _core_is_not_none(maximum)
+    if has_maximum:
+        too_large = _core_gt(value, maximum)
+        if too_large:
+            message = _core_string_format("Field '{}' failed validation: Number must be at most {}. You provided: {}.", title, maximum, value)
+            error = _core_validation_error(message)
+            raise error
+        else:
+            pass
+    else:
+        pass
+    return None
+
+
+def _schema_field_schema_impl(field: Field, is_nested: bool, options: Any) -> Any:
+    _core_coverage_mark("_schema_field_schema_impl")
+    typ = _core_get(field, "type", None)
+    type_name = _core_get(typ, "name", None)
+    media_types = []
+    media_types.append("image")
+    media_types.append("audio")
+    media_types.append("file")
+    is_media = _core_contains(media_types, type_name)
+    nested_media = _core_and(is_nested, is_media)
+    if nested_media:
+        message = _core_string_format("Media type '{}' is not allowed in nested object fields", type_name)
+        error = _core_validation_error(message)
+        raise error
+    else:
+        pass
+    schema = {}
+    field_description = _signature_describe_field_values_impl(field)
+    description = _schema_enhance_description_impl(field_description, typ)
+    has_description = _core_truthy(description)
+    if has_description:
+        schema["description"] = description
+    else:
+        pass
+    is_array = _core_get(typ, "is_array", False)
+    if is_array:
+        schema["type"] = "array"
+        fields_map = _core_get(typ, "fields", None)
+        has_fields = _core_truthy(fields_map)
+        if has_fields:
+            items = _schema_object_from_fields_impl(fields_map, True, options)
+            type_description = _core_get(typ, "description", None)
+            has_type_description = _core_truthy(type_description)
+            if has_type_description:
+                items["description"] = type_description
+            else:
+                pass
+            schema["items"] = items
+            nullable = _schema_nullable_optional_impl(schema, field, options)
+            return nullable
+        else:
+            pass
+        is_class = _core_eq(type_name, "class")
+        if is_class:
+            items = {}
+            items["type"] = "string"
+            class_options = _core_get(typ, "options", None)
+            items["enum"] = class_options
+            schema["items"] = items
+            nullable = _schema_nullable_optional_impl(schema, field, options)
+            return nullable
+        else:
+            pass
+        items = {}
+        flexible_string = _schema_flexible_json_as_string_impl(typ, options)
+        if flexible_string:
+            items["type"] = "string"
+            type_description = _core_get(typ, "description", None)
+            item_base_description = _core_coalesce(type_description, field_description)
+            item_description = _schema_enhance_description_impl(item_base_description, typ)
+            json_description = _core_description_append(item_description, "Return this field as a JSON-encoded string that can be parsed with JSON.parse.")
+            items["description"] = json_description
+        else:
+            json_type = _schema_json_type_impl(type_name)
+            items["type"] = json_type
+            type_description = _core_get(typ, "description", None)
+            item_base_description = _core_coalesce(type_description, field_description)
+            item_description = _schema_enhance_description_impl(item_base_description, typ)
+            has_item_description = _core_truthy(item_description)
+            if has_item_description:
+                items["description"] = item_description
+            else:
+                pass
+        items_with_constraints = _schema_apply_constraints_impl(items, typ)
+        schema["items"] = items_with_constraints
+        nullable = _schema_nullable_optional_impl(schema, field, options)
+        return nullable
+    else:
+        pass
+    fields_map = _core_get(typ, "fields", None)
+    is_object = _core_eq(type_name, "object")
+    has_fields = _core_truthy(fields_map)
+    is_shaped_object = _core_and(is_object, has_fields)
+    if is_shaped_object:
+        object_schema = _schema_object_from_fields_impl(fields_map, True, options)
+        updated = _core_map_update(schema, object_schema)
+        nullable = _schema_nullable_optional_impl(updated, field, options)
+        return nullable
+    else:
+        pass
+    is_class = _core_eq(type_name, "class")
+    if is_class:
+        schema["type"] = "string"
+        class_options = _core_get(typ, "options", None)
+        schema["enum"] = class_options
+        nullable = _schema_nullable_optional_impl(schema, field, options)
+        return nullable
+    else:
+        pass
+    flexible_string = _schema_flexible_json_as_string_impl(typ, options)
+    if flexible_string:
+        schema["type"] = "string"
+        json_description = _core_description_append(description, "Return this field as a JSON-encoded string that can be parsed with JSON.parse.")
+        schema["description"] = json_description
+        nullable = _schema_nullable_optional_impl(schema, field, options)
+        return nullable
+    else:
+        pass
+    json_type = _schema_json_type_impl(type_name)
+    schema["type"] = json_type
+    is_audio = _core_eq(type_name, "audio")
+    if is_audio:
+        audio_description = _core_description_append(description, "Return plain text to synthesize as speech; do not return audio bytes or JSON audio objects.")
+        schema["description"] = audio_description
+    else:
+        pass
+    schema_with_constraints = _schema_apply_constraints_impl(schema, typ)
+    nullable = _schema_nullable_optional_impl(schema_with_constraints, field, options)
+    return nullable
 
 
 def _validate_value_impl(field: Field, value: Any, path: str) -> None:
@@ -964,61 +1327,22 @@ def _validate_value_impl(field: Field, value: Any, path: str) -> None:
     return None
 
 
-def _schema_nullable_optional_impl(schema: Any, field: Field, options: Any) -> Any:
-    _core_coverage_mark("_schema_nullable_optional_impl")
-    is_optional = _core_get(field, "is_optional", False)
-    strict_camel = _core_get(options, "strictStructuredOutputs", False)
-    strict_snake = _core_get(options, "strict_structured_outputs", False)
-    strict = _core_or(strict_camel, strict_snake)
-    make_nullable = _core_and(is_optional, strict)
-    if make_nullable:
-        schema_type = _core_get(schema, "type", None)
-        type_is_list = _core_type_is(schema_type, "list")
-        if type_is_list:
-            has_null_type = _core_contains(schema_type, "null")
-            needs_null_type = _core_not(has_null_type)
-            if needs_null_type:
-                schema_type.append("null")
-            else:
-                pass
-        else:
-            nullable_type = []
-            nullable_type.append(schema_type)
-            nullable_type.append("null")
-            schema["type"] = nullable_type
-        enum_values = _core_get(schema, "enum", None)
-        enum_is_list = _core_type_is(enum_values, "list")
-        if enum_is_list:
-            none = _core_none()
-            enum_has_null = _core_contains(enum_values, none)
-            enum_needs_null = _core_not(enum_has_null)
-            if enum_needs_null:
-                enum_values.append(none)
-            else:
-                pass
-        else:
-            pass
-    else:
-        pass
-    return schema
-
-
-def _schema_object_from_fields_impl(fields_map: Any, is_nested: bool, options: Any) -> Any:
-    _core_coverage_mark("_schema_object_from_fields_impl")
+def _schema_to_json_schema_impl(fields: list[Any], schema_title: str, options: Any) -> dict[str, Any]:
+    _core_coverage_mark("_schema_to_json_schema_impl")
     schema = {}
     properties = {}
     required = []
     schema["type"] = "object"
+    schema["title"] = schema_title
     schema["properties"] = properties
     schema["required"] = required
     schema["additionalProperties"] = False
-    fields = _core_fields_from_map(fields_map)
     for field in fields:
         is_internal = _core_get(field, "is_internal", False)
         include = _core_not(is_internal)
         if include:
             field_name = _core_get(field, "name", None)
-            field_schema = _schema_field_schema_impl(field, is_nested, options)
+            field_schema = _schema_field_schema_impl(field, False, options)
             properties[field_name] = field_schema
             is_required = _schema_required_impl(field, options)
             if is_required:
@@ -1028,127 +1352,6 @@ def _schema_object_from_fields_impl(fields_map: Any, is_nested: bool, options: A
         else:
             pass
     return schema
-
-
-def _schema_field_schema_impl(field: Field, is_nested: bool, options: Any) -> Any:
-    _core_coverage_mark("_schema_field_schema_impl")
-    typ = _core_get(field, "type", None)
-    type_name = _core_get(typ, "name", None)
-    media_types = []
-    media_types.append("image")
-    media_types.append("audio")
-    media_types.append("file")
-    is_media = _core_contains(media_types, type_name)
-    nested_media = _core_and(is_nested, is_media)
-    if nested_media:
-        message = _core_string_format("Media type '{}' is not allowed in nested object fields", type_name)
-        error = _core_validation_error(message)
-        raise error
-    else:
-        pass
-    schema = {}
-    field_description = _signature_describe_field_values_impl(field)
-    description = _schema_enhance_description_impl(field_description, typ)
-    has_description = _core_truthy(description)
-    if has_description:
-        schema["description"] = description
-    else:
-        pass
-    is_array = _core_get(typ, "is_array", False)
-    if is_array:
-        schema["type"] = "array"
-        fields_map = _core_get(typ, "fields", None)
-        has_fields = _core_truthy(fields_map)
-        if has_fields:
-            items = _schema_object_from_fields_impl(fields_map, True, options)
-            type_description = _core_get(typ, "description", None)
-            has_type_description = _core_truthy(type_description)
-            if has_type_description:
-                items["description"] = type_description
-            else:
-                pass
-            schema["items"] = items
-            nullable = _schema_nullable_optional_impl(schema, field, options)
-            return nullable
-        else:
-            pass
-        is_class = _core_eq(type_name, "class")
-        if is_class:
-            items = {}
-            items["type"] = "string"
-            class_options = _core_get(typ, "options", None)
-            items["enum"] = class_options
-            schema["items"] = items
-            nullable = _schema_nullable_optional_impl(schema, field, options)
-            return nullable
-        else:
-            pass
-        items = {}
-        flexible_string = _schema_flexible_json_as_string_impl(typ, options)
-        if flexible_string:
-            items["type"] = "string"
-            type_description = _core_get(typ, "description", None)
-            item_base_description = _core_coalesce(type_description, field_description)
-            item_description = _schema_enhance_description_impl(item_base_description, typ)
-            json_description = _core_description_append(item_description, "Return this field as a JSON-encoded string that can be parsed with JSON.parse.")
-            items["description"] = json_description
-        else:
-            json_type = _schema_json_type_impl(type_name)
-            items["type"] = json_type
-            type_description = _core_get(typ, "description", None)
-            item_base_description = _core_coalesce(type_description, field_description)
-            item_description = _schema_enhance_description_impl(item_base_description, typ)
-            has_item_description = _core_truthy(item_description)
-            if has_item_description:
-                items["description"] = item_description
-            else:
-                pass
-        items_with_constraints = _schema_apply_constraints_impl(items, typ)
-        schema["items"] = items_with_constraints
-        nullable = _schema_nullable_optional_impl(schema, field, options)
-        return nullable
-    else:
-        pass
-    fields_map = _core_get(typ, "fields", None)
-    is_object = _core_eq(type_name, "object")
-    has_fields = _core_truthy(fields_map)
-    is_shaped_object = _core_and(is_object, has_fields)
-    if is_shaped_object:
-        object_schema = _schema_object_from_fields_impl(fields_map, True, options)
-        updated = _core_map_update(schema, object_schema)
-        nullable = _schema_nullable_optional_impl(updated, field, options)
-        return nullable
-    else:
-        pass
-    is_class = _core_eq(type_name, "class")
-    if is_class:
-        schema["type"] = "string"
-        class_options = _core_get(typ, "options", None)
-        schema["enum"] = class_options
-        nullable = _schema_nullable_optional_impl(schema, field, options)
-        return nullable
-    else:
-        pass
-    flexible_string = _schema_flexible_json_as_string_impl(typ, options)
-    if flexible_string:
-        schema["type"] = "string"
-        json_description = _core_description_append(description, "Return this field as a JSON-encoded string that can be parsed with JSON.parse.")
-        schema["description"] = json_description
-        nullable = _schema_nullable_optional_impl(schema, field, options)
-        return nullable
-    else:
-        pass
-    json_type = _schema_json_type_impl(type_name)
-    schema["type"] = json_type
-    is_audio = _core_eq(type_name, "audio")
-    if is_audio:
-        audio_description = _core_description_append(description, "Return plain text to synthesize as speech; do not return audio bytes or JSON audio objects.")
-        schema["description"] = audio_description
-    else:
-        pass
-    schema_with_constraints = _schema_apply_constraints_impl(schema, typ)
-    nullable = _schema_nullable_optional_impl(schema_with_constraints, field, options)
-    return nullable
 
 
 def _strip_internal_fields_impl(fields: list[Any], values: Any) -> Any:
@@ -1189,32 +1392,5 @@ def _validate_keyed_fields_impl(fields_map: Any) -> list[Any]:
         field["is_internal"] = internal
         out.append(field)
     return out
-
-
-def _schema_to_json_schema_impl(fields: list[Any], schema_title: str, options: Any) -> dict[str, Any]:
-    _core_coverage_mark("_schema_to_json_schema_impl")
-    schema = {}
-    properties = {}
-    required = []
-    schema["type"] = "object"
-    schema["title"] = schema_title
-    schema["properties"] = properties
-    schema["required"] = required
-    schema["additionalProperties"] = False
-    for field in fields:
-        is_internal = _core_get(field, "is_internal", False)
-        include = _core_not(is_internal)
-        if include:
-            field_name = _core_get(field, "name", None)
-            field_schema = _schema_field_schema_impl(field, False, options)
-            properties[field_name] = field_schema
-            is_required = _schema_required_impl(field, options)
-            if is_required:
-                required.append(field_name)
-            else:
-                pass
-        else:
-            pass
-    return schema
 
 # END AXIR CORE EMITTED FUNCTIONS

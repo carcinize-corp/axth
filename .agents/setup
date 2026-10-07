@@ -4,7 +4,8 @@ set -euo pipefail
 # Native Common Lisp development and the Core emitter; no provider credentials
 # or Jiti checkout are needed for the base package's tests.
 started=$SECONDS
-packages=(sbcl cl-yason cl-alexandria cl-ppcre cl-drakma openssl ca-certificates curl)
+repo_root=$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")
+packages=(sbcl cl-yason cl-alexandria cl-ppcre cl-drakma cl-base64 cl-cffi cl-puri cl-ironclad cl-local-time cl-sqlite cl-usocket cl-babel cl-flexi-streams cl-global-vars cl-plus-ssl cl-quri cl-split-sequence cl-trivial-features cl-trivial-garbage cl-trivial-gray-streams cl-utilities openssl ca-certificates curl)
 missing=()
 for package in "${packages[@]}"; do
   if [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true) != 'install ok installed' ]]; then
@@ -17,6 +18,34 @@ if ((${#missing[@]})); then
   sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
 fi
 echo "Lisp dependencies ready ($((SECONDS - started))s)."
+
+# The native WebSocket client is optional for applications but required by
+# the real-transport tests. Debian's Bordeaux Threads lacks BT2; resolve the
+# pinned overlay before distribution systems, without loading Quicklisp.
+deps_root="$HOME/.cache/ax-lisp-deps"
+registry_dir="$HOME/.config/common-lisp/source-registry.conf.d"
+mkdir -p "$deps_root" "$registry_dir"
+registry=$(mktemp "$registry_dir/ax-lisp.XXXXXX")
+while read -r repository commit; do
+  [[ -z "$repository" || "$repository" == \#* ]] && continue
+  directory="$deps_root/${repository##*/}-$commit"
+  if [[ ! -d "$directory/.git" ]]; then
+    (
+      stage=$(mktemp -d "$deps_root/.download.XXXXXX")
+      trap 'rm -rf "$stage"' EXIT
+      git init --quiet "$stage"
+      git -C "$stage" -c credential.helper= fetch --quiet --depth=1 \
+        "https://github.com/$repository.git" "$commit"
+      git -C "$stage" checkout --quiet --detach FETCH_HEAD
+      [[ $(git -C "$stage" rev-parse HEAD) == "$commit" ]]
+      mv "$stage" "$directory"
+    )
+  fi
+  [[ $(git -C "$directory" rev-parse HEAD) == "$commit" ]]
+  printf '(:tree "%s/")\n' "$directory" >> "$registry"
+done < "$repo_root/.agents/lisp-dependencies.lock"
+mv "$registry" "$registry_dir/10-ax-lisp.conf"
+echo "Pinned Lisp WebSocket sources ready ($((SECONDS - started))s)."
 
 # CI uses this same setup. A /usr/local/bin link makes the selected compiler
 # available to later shells, not just setup.
@@ -56,11 +85,35 @@ fi
 sudo ln -sfn "$go_root/bin/go" /usr/local/bin/go
 sudo ln -sfn "$go_root/bin/gofmt" /usr/local/bin/gofmt
 
+# Match the documentation workflow; Debian's Hugo is too old for this site.
+hugo_version=0.162.0
+if ! command -v hugo >/dev/null || [[ $(hugo version) != "hugo v$hugo_version-"* ]]; then
+  (
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    case $(uname -m) in
+      x86_64)
+        arch=amd64
+        checksum=d085eded63a9eb64349962de089173d3e1aa2d7106e1b2f3036c0d526ae04952 ;;
+      aarch64)
+        arch=arm64
+        checksum=27d56b24fa25de52a436beced21f4ee9f2831f727d1767fe0c368df9fe6b1b86 ;;
+      *) echo 'Unsupported Hugo installation architecture.' >&2; exit 1 ;;
+    esac
+    archive="hugo_${hugo_version}_linux-${arch}.tar.gz"
+    curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 120 \
+      "https://github.com/gohugoio/hugo/releases/download/v$hugo_version/$archive" -o "$scratch/$archive"
+    printf '%s  %s\n' "$checksum" "$scratch/$archive" | sha256sum --check --status
+    tar -xzf "$scratch/$archive" -C "$scratch" hugo
+    sudo install "$scratch/hugo" /usr/local/bin/hugo
+  )
+fi
+hugo version
+
 # Compile ASDF dependencies and the package into the snapshot's Lisp cache.
 # Do not run the test suite or start services during setup.
-repo_root=$(realpath "$(dirname "${BASH_SOURCE[0]}")/..")
 AX_ORB_REPO_ROOT="$repo_root" sbcl --noinform --non-interactive --eval '(require :asdf)' \
-  --eval '(dolist (s (list "yason" "cl-ppcre" "drakma" "sb-bsd-sockets" "sb-posix")) (asdf:load-system s))' \
+  --eval '(dolist (s (list "websocket-driver-client" "yason" "cl-ppcre" "drakma" "cl-base64" "cffi" "puri" "ironclad" "local-time" "sqlite" "sb-bsd-sockets" "sb-posix")) (asdf:load-system s))' \
   --eval '(asdf:load-asd (merge-pathnames "packages/lisp/axllm.asd" (uiop:ensure-directory-pathname (uiop:getenv "AX_ORB_REPO_ROOT"))))' \
   --eval '(let ((uiop:*compile-file-warnings-behaviour* :error)) (asdf:load-system "axllm/tests"))'
 "$go_root/bin/go" version

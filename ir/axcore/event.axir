@@ -65,8 +65,8 @@ module @ax.event version "0.1" {
   }
 
   op ax.event.interface @AxEventClock {
-    attr contract = "event-clock"
     attr cancellation = "system and manual sleeps wake promptly and remove cancellation registrations after either cancellation or normal completion"
+    attr contract = "event-clock"
     attr core_kind = "interface"
     attr public = true
     tag "axevent"
@@ -94,18 +94,158 @@ module @ax.event version "0.1" {
     tag "axevent"
     type signature = "(routes:list<json>, options?:json) -> json"
     body @entry(%routes: list<json>, %options: json) {
+      %no_store = core.call intrinsic.none()
+      %descriptor = core.call @event_runtime_descriptor_full(%routes, %options, %no_store)
+      core.return %descriptor
+    }
+  }
+
+  op ax.event.semantic @event_store_capability {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    attr public = true
+    tag "axevent-coordination"
+    type signature = "(descriptor:json) -> json"
+    body @entry(%descriptor: json) {
+      %out = core.map
+      %missing = core.call intrinsic.is_none(%descriptor)
+      core.if %missing {
+        core.set %out["ok"] = true
+        core.set %out["coordination"] = "single-worker"
+        core.set %out["durability"] = "volatile"
+        core.set %out["conformant"] = false
+        core.set %out["message"] = "no store descriptor; the volatile single-worker store is in use"
+        core.return %out
+      }
+      %durability = core.get %descriptor["durability"] default "volatile"
+      %claimed = core.get %descriptor["coordination"] default "single-worker"
+      %marker = core.get %descriptor["conformanceMarker"] default ""
+      %expected_marker = core.const "axevent.store-conformance.v1"
+      %marker_ok = core.call intrinsic.eq(%marker, %expected_marker)
+      %wants_multi = core.call intrinsic.eq(%claimed, "multi-worker")
+      core.if %wants_multi {
+        %marker_missing = core.call intrinsic.not(%marker_ok)
+        core.if %marker_missing {
+          core.set %out["ok"] = false
+          core.set %out["coordination"] = "single-worker"
+          core.set %out["durability"] = %durability
+          core.set %out["conformant"] = false
+          core.set %out["message"] = "a store may not claim multi-worker coordination without the axevent.store-conformance.v1 marker"
+          core.return %out
+        }
+        %persistent = core.call intrinsic.eq(%durability, "persistent")
+        %not_persistent = core.call intrinsic.not(%persistent)
+        core.if %not_persistent {
+          core.set %out["ok"] = false
+          core.set %out["coordination"] = "single-worker"
+          core.set %out["durability"] = %durability
+          core.set %out["conformant"] = false
+          core.set %out["message"] = "multi-worker coordination requires persistent durability"
+          core.return %out
+        }
+        %lease_ms = core.get %descriptor["leaseMs"] default 0
+        %lease_positive = core.call intrinsic.gt(%lease_ms, 0)
+        %lease_missing = core.call intrinsic.not(%lease_positive)
+        core.if %lease_missing {
+          core.set %out["ok"] = false
+          core.set %out["coordination"] = "single-worker"
+          core.set %out["durability"] = %durability
+          core.set %out["conformant"] = false
+          core.set %out["message"] = "multi-worker coordination requires a positive leaseMs"
+          core.return %out
+        }
+        core.set %out["ok"] = true
+        core.set %out["coordination"] = "multi-worker"
+        core.set %out["durability"] = %durability
+        core.set %out["conformant"] = true
+        core.set %out["leaseMs"] = %lease_ms
+        core.set %out["message"] = "store presents the axevent.store-conformance.v1 marker"
+        core.return %out
+      }
+      core.set %out["ok"] = true
+      core.set %out["coordination"] = "single-worker"
+      core.set %out["durability"] = %durability
+      core.set %out["conformant"] = %marker_ok
+      core.set %out["message"] = "store claims single-worker coordination"
+      core.return %out
+    }
+  }
+
+  op ax.event.semantic @event_lease_transition {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    attr public = true
+    tag "axevent-coordination"
+    type signature = "(now:number, lease:json, owner:string, lease_ms:number) -> json"
+    body @entry(%now: number, %lease: json, %owner: string, %lease_ms: number) {
+      %out = core.map
+      %expires = core.call intrinsic.add(%now, %lease_ms)
+      %absent = core.call intrinsic.is_none(%lease)
+      core.if %absent {
+        core.set %out["action"] = "claim"
+        core.set %out["owner"] = %owner
+        core.set %out["expiresAt"] = %expires
+        core.set %out["granted"] = true
+        core.return %out
+      }
+      %holder = core.get %lease["owner"] default ""
+      %held_until = core.get %lease["expiresAt"] default 0
+      %mine = core.call intrinsic.eq(%holder, %owner)
+      core.if %mine {
+        core.set %out["action"] = "renew"
+        core.set %out["owner"] = %owner
+        core.set %out["expiresAt"] = %expires
+        core.set %out["granted"] = true
+        core.return %out
+      }
+      %expired = core.call intrinsic.lte(%held_until, %now)
+      core.if %expired {
+        core.set %out["action"] = "steal"
+        core.set %out["owner"] = %owner
+        core.set %out["expiresAt"] = %expires
+        core.set %out["granted"] = true
+        core.set %out["previousOwner"] = %holder
+        core.return %out
+      }
+      core.set %out["action"] = "deny"
+      core.set %out["owner"] = %holder
+      core.set %out["expiresAt"] = %held_until
+      core.set %out["granted"] = false
+      core.return %out
+    }
+  }
+
+  op ax.event.semantic @event_runtime_descriptor_full {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    attr public = true
+    tag "axevent-coordination"
+    type signature = "(routes:list<json>, options:json, store:json) -> json"
+    body @entry(%routes: list<json>, %options: json, %store: json) {
       %empty = core.map
       %missing = core.call intrinsic.is_none(%options)
       %opts = core.let %options
       core.if %missing {
         %opts = core.let %empty
       }
+      %capability = core.call @event_store_capability(%store)
       %out = core.map
       core.set %out["routes"] = %routes
       core.set %out["options"] = %opts
-      core.set %out["durability"] = "volatile"
-      core.set %out["coordination"] = "single-worker"
+      %durability = core.get %capability["durability"] default "volatile"
+      core.set %out["durability"] = %durability
+      %coordination = core.get %capability["coordination"] default "single-worker"
+      core.set %out["coordination"] = %coordination
       core.set %out["implicitWake"] = false
+      %conformant = core.get %capability["conformant"] default false
+      core.set %out["storeConformant"] = %conformant
+      %capability_ok = core.get %capability["ok"] default true
+      core.set %out["storeAccepted"] = %capability_ok
+      %capability_message = core.get %capability["message"] default ""
+      core.set %out["storeMessage"] = %capability_message
       core.return %out
     }
   }
@@ -529,9 +669,6 @@ module @ax.event version "0.1" {
       %resources = core.call intrinsic.eq(%method, "notifications/resources/list_changed")
       %progress = core.call intrinsic.eq(%method, "notifications/progress")
       %logging = core.call intrinsic.eq(%method, "notifications/message")
-      // Legacy servers send notifications/tasks/status with the task under
-      // params.task; modern (Tasks v2) servers send notifications/tasks with the
-      // task as params. TypeScript's client records either as the task's status.
       %legacy_task = core.call intrinsic.eq(%method, "notifications/tasks/status")
       %modern_task = core.call intrinsic.eq(%method, "notifications/tasks")
       %task = core.call intrinsic.or(%legacy_task, %modern_task)

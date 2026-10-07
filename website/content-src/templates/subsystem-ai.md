@@ -81,7 +81,7 @@ and descriptions define the questions. Signature syntax and return types stay th
 Boolean value descriptions such as `boolean(true "...", false "...")` and
 class label descriptions after the label list become native criteria. The same
 signature retains those descriptions as text with other providers. The
-[Typesafe/Jev skill]({{typesafeSkillPath}}) covers the exact syntax,
+[{{typesafeSkillLabel}}]({{typesafeSkillPath}}) covers the exact syntax,
 question design, native requests, transport options, and runnable examples.
 
 {{aiTypesafeExample}}

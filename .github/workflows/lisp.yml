@@ -4,21 +4,41 @@ on:
   pull_request:
     paths:
       - '.agents/setup'
+      - '.agents/lisp-dependencies.lock'
       - 'packages/lisp/**'
       - 'tools/axir/**'
       - 'ir/**'
       - 'src/ax/ai/**'
       - 'src/ax/dsp/**'
+      - 'src/ax/agent/**'
+      - 'src/ax/funcs/**'
+      - 'src/ax/util/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/website-lisp-snippet-check.mjs'
+      - 'scripts/website-prepare.mjs'
+      - 'website/content-src/languages/lisp.json'
+      - 'website/data/homepage_languages.yaml'
       - '.github/workflows/lisp.yml'
   push:
     branches: [main]
     paths:
       - '.agents/setup'
+      - '.agents/lisp-dependencies.lock'
       - 'packages/lisp/**'
       - 'tools/axir/**'
       - 'ir/**'
       - 'src/ax/ai/**'
       - 'src/ax/dsp/**'
+      - 'src/ax/agent/**'
+      - 'src/ax/funcs/**'
+      - 'src/ax/util/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/website-lisp-snippet-check.mjs'
+      - 'scripts/website-prepare.mjs'
+      - 'website/content-src/languages/lisp.json'
+      - 'website/data/homepage_languages.yaml'
       - '.github/workflows/lisp.yml'
 
 permissions:
@@ -27,20 +47,29 @@ permissions:
 jobs:
   sbcl:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - name: Prepare Lisp orb environment
         run: |
           .agents/setup
           echo '/usr/local/bin' >> "$GITHUB_PATH"
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --ignore-scripts
       - name: Test Core emitter and generated source freshness
         working-directory: tools/axir
         run: |
           go test ./internal/axir -run Lisp
           go run ./cmd/lisp-core --check --out ../../packages/lisp/src/core.lisp
-      - name: Test native library and shared conformance fixtures
-        run: sbcl --script packages/lisp/tests/run.lisp
+      - name: Verify generated package, native tests, fixture receipts and no-key examples
+        run: npm run axir:verify:release -- --targets lisp --workdir /tmp/axir-lisp-verify ir/axcore/root.axir
+      - name: Exercise Lisp callbacks through the production JavaScript runtime
+        run: sbcl --script packages/lisp/tests/runtime-adapter-integration.lisp
+      - name: Compile published Lisp snippets against the native API
+        run: npm run website:check:lisp-snippets
       - name: Fetch pinned Jiti source
         uses: actions/checkout@v7
         with:

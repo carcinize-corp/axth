@@ -87,12 +87,30 @@ Weak on the key, so recording an order never keeps an object alive.")
         (vector-push-extend key order))))
   key)
 
-(defun %object-keys (object)
-  "OBJECT's STRING keys: the recorded order first, then the rest sorted.
+(defun %array-index-key (key)
+  "The array index KEY names as a JavaScript property name, or NIL.
 
-Sorting the remainder keeps an object built without OBJECT deterministic
-instead of exposing hash order. Non-string keys are internal record
-metadata and are never returned."
+JavaScript calls a key an array index when it is the canonical decimal
+spelling of an integer from 0 through 2^32-2: no sign, no leading zero and
+no fraction. \"0\", \"1\" and \"4294967294\" are indices; \"01\", \"-1\", \"1.5\"
+and \"4294967295\" are ordinary keys."
+  (let ((length (length key)))
+    (when (and (plusp length)
+               (or (= length 1) (char/= (char key 0) #\0))
+               (every (lambda (character) (char<= #\0 character #\9)) key))
+      (let ((index (parse-integer key)))
+        (when (<= index 4294967294) index)))))
+
+(defun %object-keys (object)
+  "OBJECT's STRING keys in JavaScript's own-property order.
+
+Array-index keys come first in ascending numeric order, then the remaining
+keys in the order they were first written, which is what Object.keys,
+for...in and JSON.stringify all follow in the reference implementation. A
+key written without OBJECT has no recorded position and sorts after the
+recorded ones, so an object built by hand stays deterministic instead of
+exposing hash order. Non-string keys are internal record metadata and are
+never returned."
   (let ((recorded (gethash object *object-key-order*))
         (keys '()))
     (let ((seen '()))
@@ -107,12 +125,36 @@ metadata and are never returned."
                    (when (and (stringp key) (not (member key seen :test #'string=)))
                      (push key extra)))
                  object)
-        (append keys (sort extra #'string<))))))
+        (let ((ordered (append keys (sort extra #'string<)))
+              (indexed '())
+              (named '()))
+          (dolist (key ordered)
+            (let ((index (%array-index-key key)))
+              (if index (push (cons index key) indexed) (push key named))))
+          (append (mapcar #'cdr (sort (nreverse indexed) #'< :key #'car))
+                  (nreverse named)))))))
 
 (defun %set-key (object key value)
   "Set OBJECT's KEY to VALUE, recording KEY's position on first write."
   (%record-key object key)
   (setf (gethash key object) value))
+
+(defun %delete-key (object key)
+  "Remove KEY from OBJECT, and forget the position it held.
+
+Forgetting the position is the point: a key written again after being
+deleted is a new key and takes the next position, as it does in
+JavaScript. Leaving the old position recorded would put it back where it
+used to be, so deleting a and then writing it again would read as a, b
+instead of b, a."
+  (remhash key object)
+  (let ((order (gethash object *object-key-order*)))
+    (when (and order (stringp key))
+      (let ((at (position key order :test #'string=)))
+        (when at
+          (replace order order :start1 at :start2 (1+ at))
+          (decf (fill-pointer order))))))
+  object)
 
 (defun %new-object ()
   (make-hash-table :test 'equal))
@@ -170,6 +212,47 @@ than as NIL."
 ;;; Parsing
 ;;; ------------------------------------------------------------------
 
+;;; The largest finite double is (2 - 2^-52) x 2^1023, and a magnitude
+;;; rounds to it while it stays below the halfway point to the next value,
+;;; 2^1024 - 2^970. At or above that, IEEE rounding would give an infinity,
+;;; which is not a JSON number, so this parser rejects the document rather
+;;; than inventing one.
+(defconstant +double-overflow-threshold+ (- (expt 2 1024) (expt 2 970)))
+
+(defun %json-number-value (token)
+  "The number JSON TOKEN denotes, which must already be valid JSON syntax.
+
+An integer token becomes an exact Lisp integer, keeping every digit. A
+token with a fraction or an exponent becomes the nearest double, computed
+through exact rational arithmetic: Lisp's own reader overflows on
+1.7976931348623157e308, the largest double there is, because it rounds
+while scaling. A magnitude too large for a double is an error, as is any
+token this cannot read."
+  (let ((dot (position #\. token))
+        (exponent-at (position-if (lambda (character) (find character "eE")) token)))
+    (if (and (null dot) (null exponent-at))
+        (or (ignore-errors (parse-integer token))
+            (error 'ax-error :message (format nil "Invalid JSON number ~s" token)))
+        (let* ((negative (char= (char token 0) #\-))
+               (body-start (if negative 1 0))
+               (body-end (or exponent-at (length token)))
+               (whole-end (or dot body-end))
+               (whole (subseq token body-start whole-end))
+               (fraction (if dot (subseq token (1+ dot) body-end) ""))
+               (exponent (if exponent-at
+                             (parse-integer token :start (1+ exponent-at))
+                             0))
+               (digits (parse-integer (concatenate 'string whole fraction)))
+               (scale (- exponent (length fraction)))
+               (exact (* digits (expt 10 scale))))
+          (when (>= exact +double-overflow-threshold+)
+            (error 'ax-error :message (format nil "JSON number ~s is out of range" token)))
+          ;; A magnitude below the smallest subnormal rounds to zero, as it
+          ;; does in the reference implementation; that is not an error.
+          (let ((value (sb-int:with-float-traps-masked (:underflow :inexact)
+                         (coerce exact 'double-float))))
+            (if negative (- value) value))))))
+
 (defun parse-json (string)
   "Parse STRING as one complete JSON document.
 
@@ -190,36 +273,75 @@ error rather than being ignored. Signals AX-ERROR on invalid input."
              (space ()
                (loop while (member (peek) '(#\Space #\Tab #\Newline #\Return))
                      do (incf at)))
+             (hex-unit ()
+               ;; The four hex digits of a \u escape, as one UTF-16 unit.
+               (let ((end (+ at 4)))
+                 (unless (and (<= end size)
+                              (every (lambda (digit) (digit-char-p digit 16))
+                                     (subseq string at end)))
+                   (invalid))
+                 (let ((unit (parse-integer string :start at :end end :radix 16)))
+                   (setf at end)
+                   unit)))
              (text-value ()
-               (let ((start at))
-                 (unless (take #\") (invalid))
-                 (loop for char = (peek)
-                       do (unless char (invalid))
+               ;; Decoded here rather than handed to a JSON library, so the
+               ;; UTF-16 rules are this port's own: a surrogate pair becomes
+               ;; one character, and an unpaired surrogate escape becomes
+               ;; that unit, which is what JSON.parse does and what makes an
+               ;; encode and parse round trip of streamed text hold. A raw
+               ;; control character is still refused.
+               (unless (take #\") (invalid))
+               (let ((out (make-string-output-stream)))
+                 (loop
+                   (let ((char (peek)))
+                     (unless char (invalid))
+                     (incf at)
+                     (cond
+                       ((char= char #\") (return (get-output-stream-string out)))
+                       ((< (char-code char) 32) (invalid))
+                       ((char= char #\\)
+                        (let ((escape (peek)))
+                          (unless escape (invalid))
                           (incf at)
-                       until (char= char #\")
-                       do (cond ((< (char-code char) 32) (invalid))
-                                ((char= char #\\)
-                                 (let ((escape (peek)))
-                                   (unless (and escape (find escape "\"\\/bfnrtu")) (invalid))
-                                   (incf at)
-                                   (when (char= escape #\u)
-                                     (dotimes (i 4)
-                                       (unless (and (peek) (digit-char-p (peek) 16)) (invalid))
-                                       (incf at)))))))
-                 (let ((text (handler-case (yason:parse (subseq string start at))
-                               (error () (invalid)))))
-                   ;; Lone surrogates cannot be encoded as UTF-8.
-                   (when (find-if (lambda (c) (<= #xd800 (char-code c) #xdfff)) text)
-                     (invalid))
-                   text)))
+                          (case escape
+                            (#\" (write-char #\" out))
+                            (#\\ (write-char #\\ out))
+                            (#\/ (write-char #\/ out))
+                            (#\b (write-char #\Backspace out))
+                            (#\f (write-char #\Page out))
+                            (#\n (write-char #\Newline out))
+                            (#\r (write-char #\Return out))
+                            (#\t (write-char #\Tab out))
+                            (#\u
+                             (let ((unit (hex-unit)))
+                               (if (and (<= #xd800 unit #xdbff)
+                                        (< (1+ at) size)
+                                        (char= (char string at) #\\)
+                                        (char= (char string (1+ at)) #\u))
+                                   ;; A high surrogate followed by a low one
+                                   ;; is a single character; a high surrogate
+                                   ;; followed by anything else is itself.
+                                   (let* ((mark at)
+                                          (next (progn (incf at 2) (hex-unit))))
+                                     (if (<= #xdc00 next #xdfff)
+                                         (write-char
+                                          (code-char (+ #x10000
+                                                        (ash (- unit #xd800) 10)
+                                                        (- next #xdc00)))
+                                          out)
+                                         (progn (setf at mark)
+                                                (write-char (code-char unit) out))))
+                                   (write-char (code-char unit) out))))
+                            (t (invalid)))))
+                       (t (write-char char out)))))))
              (number-value ()
                (let ((start at))
                  (loop while (and (peek) (find (peek) "0123456789-+.eE")) do (incf at))
                  (let ((token (subseq string start at)))
                    (unless (cl-ppcre:scan "\\A-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\\z" token)
                      (invalid))
-                   (handler-case (read-from-string token)
-                     (error () (invalid))))))
+                   (handler-case (%json-number-value token)
+                     (ax-error () (invalid))))))
              (constant-value (spelling value)
                (unless (and (<= (+ at (length spelling)) size)
                             (string= spelling string :start2 at :end2 (+ at (length spelling))))
@@ -279,60 +401,185 @@ error rather than being ignored. Signals AX-ERROR on invalid input."
              (#\Return (write-string "\\r" stream))
              (#\Tab (write-string "\\t" stream))
              (otherwise
-              (cond ((< (char-code char) 32) (format stream "\\u~4,'0X" (char-code char)))
+              ;; Lower-case hex, as JSON.stringify and Python's encoder
+              ;; both write it: "\u001b", not "\u001B".
+              (cond ((< (char-code char) 32) (format stream "\\u~(~4,'0x~)" (char-code char)))
+                    ;; A string can hold one half of a surrogate pair when a
+                    ;; provider split the pair across two stream events. It
+                    ;; has no UTF-8 encoding, so write it as the escape
+                    ;; JSON.stringify writes (well-formed JSON.stringify,
+                    ;; ES2019) rather than refusing the whole document.
                     ((<= #xd800 (char-code char) #xdfff)
-                     (error 'ax-error :message "encode-json: lone Unicode surrogate"))
+                     (format stream "\\u~(~4,'0x~)" (char-code char)))
                     (t (write-char char stream))))))
   (write-char #\" stream))
 
-(defun %write-json (value stream)
-  (cond ((eq value :null) (write-string "null" stream))
-        ((eq value 'yason:true) (write-string "true" stream))
-        ((eq value 'yason:false) (write-string "false" stream))
-        ((null value) (write-string "null" stream))
-        ((%object-p value)
-         (write-char #\{ stream)
-         (loop for key in (%object-keys value)
-               for first = t then nil
-               do (unless first (write-char #\, stream))
-                  (%write-json-string key stream)
-                  (write-char #\: stream)
-                  (%write-json (gethash key value) stream))
-         (write-char #\} stream))
-        ((%array-p value)
-         (write-char #\[ stream)
-         (loop for item across value
-               for first = t then nil
-               do (unless first (write-char #\, stream))
-                  (%write-json item stream))
-         (write-char #\] stream))
-        ((stringp value) (%write-json-string value stream))
-        ((integerp value) (format stream "~D" value))
-        ((realp value) (write-string (%json-number-text value) stream))
-        (t (error 'ax-error
-                  :message (format nil "encode-json: ~S is not a JSON value in this model" value)))))
+(defun %write-json (value stream &key indent sort-keys (depth 0))
+  "Write VALUE to STREAM as JSON.
+
+INDENT is the number of spaces per level, as JSON.stringify's third
+argument; NIL writes the compact form. SORT-KEYS writes object keys in
+sorted order at every level instead of JavaScript's own-property order,
+which is what a stable stringification needs."
+  (flet ((newline (level)
+           (when indent
+             (write-char #\Newline stream)
+             (dotimes (i (* indent level)) (write-char #\Space stream)))))
+    (cond ((eq value :null) (write-string "null" stream))
+          ((eq value 'yason:true) (write-string "true" stream))
+          ((eq value 'yason:false) (write-string "false" stream))
+          ((null value) (write-string "null" stream))
+          ((%object-p value)
+           (let ((keys (let ((keys (%object-keys value)))
+                         (if sort-keys (sort (copy-list keys) #'string<) keys))))
+             (if (null keys)
+                 (write-string "{}" stream)
+                 (progn
+                   (write-char #\{ stream)
+                   (loop for key in keys
+                         for first = t then nil
+                         do (unless first (write-char #\, stream))
+                            (newline (1+ depth))
+                            (%write-json-string key stream)
+                            (write-char #\: stream)
+                            (when indent (write-char #\Space stream))
+                            (%write-json (gethash key value) stream
+                                         :indent indent :sort-keys sort-keys
+                                         :depth (1+ depth)))
+                   (newline depth)
+                   (write-char #\} stream)))))
+          ((%array-p value)
+           (if (zerop (length value))
+               (write-string "[]" stream)
+               (progn
+                 (write-char #\[ stream)
+                 (loop for item across value
+                       for first = t then nil
+                       do (unless first (write-char #\, stream))
+                          (newline (1+ depth))
+                          (%write-json item stream
+                                       :indent indent :sort-keys sort-keys
+                                       :depth (1+ depth)))
+                 (newline depth)
+                 (write-char #\] stream))))
+          ((stringp value) (%write-json-string value stream))
+          ((integerp value) (format stream "~D" value))
+          ((realp value) (write-string (%json-number-text value) stream))
+          (t (error 'ax-error
+                    :message (format nil "encode-json: ~S is not a JSON value in this model" value))))))
+
+(defun %float-nonfinite-p (number)
+  "Whether NUMBER is a NaN or an infinity."
+  (or (sb-ext:float-nan-p number) (sb-ext:float-infinity-p number)))
+
+(defun %decimal-point (value)
+  "The N with 10^(N-1) <= VALUE < 10^N, for an exact positive rational."
+  (let ((point 0))
+    (loop while (>= value (expt 10 point)) do (incf point))
+    (loop while (< value (expt 10 (1- point))) do (decf point))
+    point))
+
+(defun %float-decimal-digits (number)
+  "NUMBER's shortest decimal digits that read back as NUMBER, and where its
+decimal point sits: the magnitude is 0.DIGITS x 10^POINT.
+
+NUMBER must be a non-zero finite float. The digits are found from the
+float's exact rational value and checked by reading each candidate back,
+so the result is the shortest round-tripping decimal rather than whatever
+this implementation's printer happens to emit. SBCL's printer is not
+shortest for subnormals: it writes least-positive-double-float as
+4.9406564584124654e-324 where the shortest round trip is 5e-324, the text
+every other Ax port produces."
+  (let* ((magnitude (abs number))
+         (exact (rational magnitude))
+         (point (%decimal-point exact)))
+    (loop for count from 1 to 17
+          do (let* ((scaled (round (* exact (expt 10 (- count point)))))
+                    (carried (= scaled (expt 10 count)))
+                    (digits (if carried 1 scaled))
+                    (point (if carried (1+ point) point)))
+               ;; A candidate can round up out of range near the largest
+               ;; float, which is a rejected candidate rather than an error:
+               ;; one digit of 1.7976931348623157e308 reads back as 2e308,
+               ;; and asking for that float raises rather than trapping.
+               (when (eql magnitude
+                          (ignore-errors
+                           (sb-int:with-float-traps-masked (:underflow :inexact)
+                             (float (* digits (expt 10 (- point count))) magnitude))))
+                 (let ((text (string-right-trim "0" (format nil "~D" digits))))
+                   (return (values (if (plusp (length text)) text "0") point)))))
+          finally (error 'ax-error
+                         :message (format nil "~S has no decimal round trip" number)))))
+
+(defun %js-number-text (value)
+  "VALUE as JavaScript's String(number) writes it.
+
+An exact Lisp integer keeps all its digits: this port never narrows one
+silently, and the reference implementation cannot produce an integer it
+would have to narrow. A float follows ECMAScript's Number::toString:
+shortest round-tripping digits, plain decimal notation from 1e-6 up to
+1e21, exponent notation outside that range (1e-7, 1e+21), \"0\" for both
+zeros, and NaN, Infinity or -Infinity for the non-finite values."
+  (when (integerp value)
+    (return-from %js-number-text (format nil "~D" value)))
+  (unless (floatp value)
+    ;; A ratio can only arrive from Lisp code: Core arithmetic never makes
+    ;; one. Read it as the double it would be in the reference semantics.
+    (return-from %js-number-text (%js-number-text (float value 1d0))))
+  (cond ((sb-ext:float-nan-p value) "NaN")
+        ((sb-ext:float-infinity-p value) (if (plusp value) "Infinity" "-Infinity"))
+        ((zerop value) "0")
+        (t
+         (multiple-value-bind (digits point) (%float-decimal-digits value)
+           (let* ((count (length digits))
+                  (text
+                    (cond ((<= count point 21)
+                           (concatenate 'string digits (make-string (- point count)
+                                                                    :initial-element #\0)))
+                          ((< 0 point 21)
+                           (concatenate 'string (subseq digits 0 point) "."
+                                        (subseq digits point)))
+                          ((< -6 point 1)
+                           (concatenate 'string "0."
+                                        (make-string (- point) :initial-element #\0)
+                                        digits))
+                          (t
+                           (let ((power (1- point)))
+                             (concatenate 'string
+                                          (subseq digits 0 1)
+                                          (if (> count 1)
+                                              (concatenate 'string "." (subseq digits 1))
+                                              "")
+                                          (if (minusp power) "e-" "e+")
+                                          (format nil "~D" (abs power))))))))
+             (if (minusp value) (concatenate 'string "-" text) text))))))
 
 (defun %json-number-text (value)
-  "VALUE as JSON number text, matching how the other Ax ports write it.
+  "VALUE as JSON number text: %JS-NUMBER-TEXT, with null for a non-finite
+float, exactly as JSON.stringify writes numbers."
+  (if (and (floatp value) (%float-nonfinite-p value))
+      "null"
+      (%js-number-text value)))
 
-An integral value keeps integer form, so 18.0 writes as 18 and not 18.0.
-Magnitudes at or beyond 1e21, and below 1e-6, fall back to Lisp exponent
-notation normalised to e; Ax's signature constraints do not reach there."
-  (let ((number (if (floatp value) value (float value 1d0))))
-    (cond ((/= number number) (error 'ax-error :message "encode-json: NaN is not a JSON number"))
-          ((or (> number most-positive-double-float) (< number most-negative-double-float))
-           (error 'ax-error :message "encode-json: infinity is not a JSON number"))
-          ((and (= number (fround number)) (< (abs number) 1d21))
-           (format nil "~D" (round number)))
-          (t (let* ((*read-default-float-format* (type-of number))
-                    (text (prin1-to-string number)))
-               (substitute #\e #\d text))))))
-
-(defun encode-json (value)
+(defun encode-json (value &key indent sort-keys)
   "VALUE as a JSON string.
 
-Encodes this package's value model: objects in key order, YASON:TRUE and
-YASON:FALSE as true and false, and :NULL as null. NIL also writes as null,
-but :NULL is the value to pass; an empty array must be a vector."
+Encodes this package's value model: objects in JavaScript's own-property
+order, YASON:TRUE and YASON:FALSE as true and false, and :NULL as null.
+NIL also writes as null, but :NULL is the value to pass; an empty array
+must be a vector.
+
+INDENT is the number of spaces per nesting level, as JSON.stringify's
+third argument. SORT-KEYS orders every object's keys by name instead,
+which a cache key or other stable form needs.
+
+Numbers: a float is written as JavaScript writes it, with a NaN or an
+infinity becoming null as JSON.stringify does. A Lisp integer keeps every
+digit, including beyond 2^53, rather than being narrowed to a double
+behind the caller's back. That is the one deliberate difference from the
+reference implementation, which has no exact integers and so can never
+produce a value this has to decide about; a caller that wants the
+reference projection should convert with AXLLM/CORE::CORE-JS-NUMBER
+first."
   (with-output-to-string (stream)
-    (%write-json value stream)))
+    (%write-json value stream :indent indent :sort-keys sort-keys)))

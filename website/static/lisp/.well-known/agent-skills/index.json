@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schemas.agentskills.io/discovery/0.2.0/schema.json",
+  "skills": [
+    {
+      "name": "programming-with-ax-lisp",
+      "type": "skill-md",
+      "description": "Builds typed LLM programs with the native Ax Common Lisp ASDF system. Use for Lisp signatures, providers, generation, tools, agents, flows, optimization, and MCP.",
+      "url": "programming-with-ax-lisp/SKILL.md",
+      "digest": "sha256:7d93040596101127e3c1c0c64ba7b7e051ec2657533fe23f664856f966d189f0"
+    }
+  ]
+}

@@ -84,6 +84,25 @@ func TestCoreFuncRegistryFromAxCore(t *testing.T) {
 		"mcp_inheritance_plan":                 "_mcp_inheritance_plan",
 		"mcp_oauth_validate_issuer":            "mcp_oauth_validate_issuer",
 		"mcp_tool_call_outcome":                "mcp_tool_call_outcome",
+		// The MCP App and event-store additions that took this module from
+		// 57 to 67. They are named here, not just counted, so the module
+		// total below is backed by the exact symbols that justify it.
+		"mcp_app_csp_source_list":       "mcp_app_csp_source_list",
+		"mcp_app_resource_plan":         "mcp_app_resource_plan",
+		"mcp_app_resource_policy":       "mcp_app_resource_policy",
+		"mcp_app_tool_meta":             "mcp_app_tool_meta",
+		"mcp_app_tool_visible_to":       "mcp_app_tool_visible_to",
+		"mcp_app_view_message_plan":     "mcp_app_view_message_plan",
+		"mcp_server_request_plan":       "mcp_server_request_plan",
+		"mcp_server_request_plan_full":  "mcp_server_request_plan_full",
+		"event_lease_transition":        "event_lease_transition",
+		"event_runtime_descriptor_full": "event_runtime_descriptor_full",
+		"event_store_capability":        "event_store_capability",
+		"ucp_signature_components":      "ucp_signature_components",
+		"ucp_signature_params":          "ucp_signature_params",
+		"ucp_signature_base":            "ucp_signature_base",
+		"ucp_signature_headers":         "ucp_signature_headers",
+		"ucp_verify_signature_policy":   "ucp_verify_signature_policy",
 	} {
 		if got := names[sym]; got != want {
 			t.Fatalf("registry name for @%s = %q, want %q", sym, got, want)
@@ -94,8 +113,11 @@ func TestCoreFuncRegistryFromAxCore(t *testing.T) {
 	for _, spec := range specs {
 		byModule[spec.Module]++
 	}
-	if byModule["mcp"] != 57 {
-		t.Fatalf("expected the 57 MCP/UCP/event core functions in the registry, got %d", byModule["mcp"])
+	// 72 includes the MCP App/event-store additions, the compatibility request
+	// planner, and five UCP signing helpers, all named above. Raise this only
+	// together with the names that account for the difference.
+	if byModule["mcp"] != 72 {
+		t.Fatalf("expected the 72 MCP/UCP/event core functions in the registry, got %d", byModule["mcp"])
 	}
 	if byModule[""] != 0 {
 		t.Fatal("registry contains specs without emit_module")

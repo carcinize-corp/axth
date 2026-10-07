@@ -12,7 +12,7 @@ const repoRoot = path.resolve(scriptDir, '..');
 const rootAxir = path.join(repoRoot, 'ir', 'axcore', 'root.axir');
 const runAxirScript = path.join(scriptDir, 'run-axir.mjs');
 const packagesRoot = path.join(repoRoot, 'packages');
-const targets = ['python', 'java', 'cpp', 'go', 'rust'];
+const targets = ['python', 'java', 'cpp', 'go', 'rust', 'lisp'];
 const cacheRoot = process.env.GOCACHE || path.join(tmpdir(), 'go-build');
 const modCacheRoot =
   process.env.GOMODCACHE ||
@@ -77,8 +77,8 @@ try {
 }
 
 async function compareDirectories(expectedRoot, actualRoot, target, diffs) {
-  const expectedFiles = await listFiles(expectedRoot);
-  const actualFiles = await listFiles(actualRoot);
+  const expectedFiles = await listFiles(expectedRoot, target);
+  const actualFiles = await listFiles(actualRoot, target);
   const expectedSet = new Set(expectedFiles);
   const actualSet = new Set(actualFiles);
 
@@ -102,7 +102,7 @@ async function compareDirectories(expectedRoot, actualRoot, target, diffs) {
   }
 }
 
-async function listFiles(root) {
+async function listFiles(root, target) {
   const files = [];
   await visit(root, '');
   return files.sort();
@@ -112,6 +112,14 @@ async function listFiles(root) {
     for (const entry of entries) {
       if (shouldIgnore(entry.name)) continue;
       const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (
+        target === 'lisp' &&
+        (entry.name === '_build' ||
+          entry.name === '.git' ||
+          entry.name.endsWith('.fasl') ||
+          rel === 'tests/conformance-coverage.json')
+      )
+        continue;
       const abs = path.join(absDir, entry.name);
       if (entry.isDirectory()) {
         await visit(abs, rel);

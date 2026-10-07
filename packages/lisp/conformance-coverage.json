@@ -1,0 +1,110 @@
+{
+  "axir_version": "0.1",
+  "target": "lisp",
+  "package_name": "axllm",
+  "suites": {
+    "axagent": [
+      {
+        "suite": "axagent",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      },
+      {
+        "suite": "axagent",
+        "kind": "agent_runtime_profile",
+        "operation": "javascript-process",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axai": [
+      {
+        "suite": "axai",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axevent": [
+      {
+        "suite": "axevent",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axflow": [
+      {
+        "suite": "axflow",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axgen": [
+      {
+        "suite": "axgen",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axmcp": [
+      {
+        "suite": "axmcp",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axoptimize": [
+      {
+        "suite": "axoptimize",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "axprogram": [
+      {
+        "suite": "axprogram",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "prompt": [
+      {
+        "suite": "prompt",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "schema": [
+      {
+        "suite": "schema",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "signature": [
+      {
+        "suite": "signature",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ],
+    "validation": [
+      {
+        "suite": "validation",
+        "kind": "suite",
+        "runner": "tests/run.lisp",
+        "category": "semantic"
+      }
+    ]
+  }
+}

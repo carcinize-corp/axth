@@ -429,7 +429,7 @@ var coreIntrinsicJava = map[CoreIntrinsic]string{
 	IntrinsicAgentStageTraces:          "Core.agentStageTraces",
 	IntrinsicAgentClarificationErr:     "Core.agentClarificationError",
 	IntrinsicAgentRuntimeCreate:        "Core.agentRuntimeCreateSession",
-	IntrinsicAgentRuntimeExecutable:        "Core.agentRuntimeIsExecutable",
+	IntrinsicAgentRuntimeExecutable:    "Core.agentRuntimeIsExecutable",
 	IntrinsicAgentRuntimeExecute:       "Core.agentRuntimeExecute",
 	IntrinsicAgentRuntimeInspect:       "Core.agentRuntimeInspect",
 	IntrinsicAgentRuntimeExport:        "Core.agentRuntimeExportState",
@@ -518,6 +518,28 @@ func javaStringLiteral(value string) string {
 	return "String.join(\"\", new String[] {\n        " + strings.Join(parts, ",\n        ") + "\n      })"
 }
 
+var javaReservedNames = map[string]bool{
+	"abstract": true, "assert": true, "boolean": true, "break": true,
+	"byte": true, "case": true, "catch": true, "char": true, "class": true,
+	"const": true, "continue": true, "default": true, "do": true,
+	"double": true, "else": true, "enum": true, "extends": true,
+	"false": true, "final": true, "finally": true, "float": true,
+	"for": true, "goto": true, "if": true, "implements": true,
+	"import": true, "instanceof": true, "int": true, "interface": true,
+	"long": true, "native": true, "new": true, "null": true,
+	"package": true, "private": true, "protected": true, "public": true,
+	"return": true, "short": true, "static": true, "strictfp": true,
+	"super": true, "switch": true, "synchronized": true, "this": true,
+	"throw": true, "throws": true, "transient": true, "true": true,
+	"try": true, "void": true, "volatile": true, "while": true, "_": true,
+	"record": true, "sealed": true, "permits": true, "yield": true, "var": true,
+}
+
 func javaName(value string) string {
-	return strings.TrimPrefix(value, "%")
+	name := strings.TrimPrefix(value, "%")
+	// Escape the prefix too: a valid Core name must not collide with a keyword.
+	if javaReservedNames[name] || strings.HasPrefix(name, "_ax_keyword_") {
+		return "_ax_keyword_" + name
+	}
+	return name
 }

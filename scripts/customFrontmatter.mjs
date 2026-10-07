@@ -22,7 +22,7 @@ export function load(app) {
 /**
  * Transforms markdown link paths to a specific format.
  * Examples:
- * [`AxChatResponse`](TypeAlias.AxChatResponse.md) -> [`AxChatResponse`](#typealiasaxchatresponse)
+ * [`AxChatResponse`](TypeAlias.AxChatResponse.md) -> [`AxChatResponse`](/apidocs/typealiasaxchatresponse/)
  *
  * @param {string | undefined} input - The input markdown content
  * @returns {string | undefined} Transformed markdown content
@@ -32,24 +32,13 @@ function replaceAndFormat(input) {
 
   return input.replace(
     /(\[`?[^`\]]+`?\]\()([^)]+)(\))/g,
-    (_match, linkText, path, closing) => {
-      if (path.startsWith('https://')) {
-        return path;
-      }
-
-      // Remove file extension
-      let transformedPath = path.replace(/\.md$/, '');
-
-      // Remove special characters like dots and convert to lowercase
-      transformedPath = transformedPath
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, '');
-
-      transformedPath = `/apidocs/${transformedPath}`;
-
-      console.log(transformedPath);
-
-      return `${linkText}${transformedPath}${closing}`;
+    (match, linkText, path, closing) => {
+      // Only local TypeDoc pages need rewriting. Preserve external links,
+      // same-page anchors, and the fragment's spelling (including underscores).
+      const local = path.match(/^(?:\.\/)?([^/#:]+)\.md(#[^\s]*)?$/);
+      if (!local) return match;
+      const slug = local[1].toLowerCase().replace(/[^a-z0-9-]/g, '');
+      return `${linkText}/apidocs/${slug}/${local[2] ?? ''}${closing}`;
     }
   );
 }

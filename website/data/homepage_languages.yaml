@@ -652,3 +652,98 @@ languages:
       generation: ax("topic:string -> chunk:string")?
       translation: ax("text:string, targetLanguage:string -> translation:string")?
       summarization: ax("doc:string -> summary:string, keyPoints:string[]")?
+  - id: lisp
+    label: Common Lisp
+    shortLabel: Lisp
+    codeLang: lisp
+    command: (asdf:load-system "axllm")
+    statusLabel: ASDF system for SBCL
+    skillsCommand: npx skills add https://ax-llm.github.io/ax/lisp/ --skill '*'
+    classifier:
+      filename: classify.lisp
+      runtimeLabel: ax:ax
+      status: Hash tables in, validated Ax fields out
+      output: |
+        {
+          "sentiment": "positive"
+        }
+      code: |
+        (asdf:load-system "axllm")
+
+        (let ((llm (ax:ai :name "openai" :model "gpt-5.4-mini"
+                          :api-key (uiop:getenv "OPENAI_API_KEY")))
+              (classify (ax:ax "review:string -> sentiment:class \"positive, negative, neutral\"")))
+          (ax:forward classify llm
+                      (ax:object "review" "This product is amazing!")))
+    audio:
+      filename: audio.lisp
+      runtimeLabel: speech:audio
+      code: |
+        (asdf:load-system "axllm")
+
+        (let ((llm (ax:ai :name "openai" :model "gpt-5.4-mini"
+                          :api-key (uiop:getenv "OPENAI_API_KEY")))
+              (narrator (ax:ax "article:string -> speech:audio, summary:string")))
+          (ax:forward narrator llm
+                      (ax:object "article" article)
+                      (ax:object "renderAudio" ax:true)))
+    signatureString:
+      filename: signatures.lisp
+      code: |
+        (ax:ax "doc:string -> names:string[], dates:date[], amounts:number[]")
+    signatureFluent:
+      filename: fields.lisp
+      code: |
+        (ax:signature-from-spec
+         (ax:s :inputs (ax:object "document" (ax:f "string"))
+               :outputs (ax:object "summary" (ax:f "string")
+                                   "tags" (ax:f "string" :array ax:true))))
+    signatureSchema:
+      filename: schema.lisp
+      code: |
+        (let ((sig (ax:parse-signature
+                    "document:string -> summary:string, score:number")))
+          (ax:encode-json (ax:json-schema sig :side :output)))
+    agent:
+      filename: audit.lisp
+      runtimeLabel: JavaScript runtime session
+      status: Illustrative audit result — see the runnable example and measurements
+      output: |
+        {
+          "total": 9161.10,
+          "flagged": [
+            "txn-2020", "txn-2054", "txn-2088",
+            "txn-2105", "txn-2122", "txn-2156",
+            "txn-2207", "txn-2224", "txn-2241"
+          ]
+        }
+      code: |
+        (asdf:load-system "axllm")
+
+        (let ((llm (ax:ai :name "openai" :model "gpt-5.4-mini"
+                          :api-key (uiop:getenv "OPENAI_API_KEY")))
+              (auditor (ax:agent "ledger:json, question:string -> total:number, flagged:string[]"
+                                 :options (ax:object
+                                           ;; ledger stays in the runtime
+                                           "contextFields" (vector "ledger")
+                                           "runtime" (ax:object "language" "JavaScript")))))
+          (ax:agent-forward auditor llm
+                            (ax:object "ledger" ledger
+                                       "question" "Total PROJECT-X spend; flag txns over threshold")
+                            :options (ax:object "runtime" engine)))
+    provider:
+      filename: providers.lisp
+      code: |
+        (ax:ai :name "openai" :api-key (uiop:getenv "OPENAI_API_KEY"))
+        (ax:ai :name "anthropic" :api-key (uiop:getenv "ANTHROPIC_API_KEY"))
+        (ax:ai :name "openai" :base-url "http://localhost:11434/v1"
+                              :api-key (uiop:getenv "LOCAL_API_KEY"))
+    patterns:
+      classification: (ax:ax "text:string -> category:class \"spam, ham, promo\"")
+      extraction: (ax:ax "document:string -> names:string[], dates:date[]")
+      qa: (ax:ax "context:string, question:string -> answer:string")
+      multimodal: (ax:ax "photo:image, question:string -> answer:string")
+      decision: (ax:ax "email:string, score:number -> valid:boolean")
+      generation: (ax:ax "topic:string -> chunk:string")
+      translation: (ax:ax "text:string, targetLanguage:string -> translation:string")
+      summarization: (ax:ax "doc:string -> summary:string, keyPoints:string[]")

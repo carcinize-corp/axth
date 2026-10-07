@@ -447,6 +447,9 @@ var javaAxUCPClient string
 //go:embed templates/mcp/javaAxMCPOAuthOptions.java
 var javaAxMCPOAuthOptions string
 
+//go:embed templates/mcp/javaAxMCPAppBridge.java
+var javaAxMCPAppBridge string
+
 //go:embed templates/mcp/javaAxMCPScriptedTransport.java
 var javaAxMCPScriptedTransport string
 

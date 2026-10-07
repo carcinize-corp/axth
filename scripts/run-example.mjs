@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -30,6 +38,10 @@ const languageAliases = new Map([
   ['go', 'go'],
   ['rust', 'rust'],
   ['rs', 'rust'],
+  ['lisp', 'lisp'],
+  ['cl', 'lisp'],
+  ['sbcl', 'lisp'],
+  ['common-lisp', 'lisp'],
 ]);
 
 const defaultExt = {
@@ -39,6 +51,7 @@ const defaultExt = {
   cpp: '.cpp',
   go: '.go',
   rust: '.rs',
+  lisp: '.lisp',
 };
 
 const languageDir = {
@@ -48,6 +61,7 @@ const languageDir = {
   cpp: 'cpp',
   go: 'go',
   rust: 'rust',
+  lisp: 'lisp',
 };
 
 const env = loadDotEnv();
@@ -105,6 +119,9 @@ switch (language) {
   case 'rust':
     await runRust(example, exampleArgs);
     break;
+  case 'lisp':
+    await runLisp(example, exampleArgs);
+    break;
   default:
     usage(1);
 }
@@ -117,6 +134,7 @@ function usage(code) {
   npm run example -- cpp src/examples/cpp/generation/axgen_openai.cpp
   npm run example -- go src/examples/go/generation/axgen_openai.go
   npm run example -- rust src/examples/rust/generation/axgen_openai.rs
+  npm run example -- lisp src/examples/lisp/generation/axgen-openai.lisp
   npm run example -- list
   npm run example -- list --json
   npm run example -- <language> <path> --compile-only
@@ -127,20 +145,25 @@ Generated package fixtures under packages/<language>/examples can still be run b
 }
 
 function listExamples(catalog, listArgs) {
+  // Written synchronously to fd 1: console.log queues an async write on a
+  // pipe, and the process.exit below would truncate the catalog partway
+  // through for any caller that reads `list --json` from a pipe.
   if (listArgs.includes('--json')) {
-    console.log(JSON.stringify(catalog, null, 2));
+    writeFileSync(1, `${JSON.stringify(catalog, null, 2)}\n`);
     process.exit(0);
   }
 
+  const lines = [];
   for (const [language, rows] of Object.entries(catalog.byLanguage)) {
-    console.log(`${language}:`);
+    lines.push(`${language}:`);
     for (const example of rows) {
-      console.log(
+      lines.push(
         `  ${example.group.padEnd(14)} ${example.level.padEnd(12)} ${example.command.padEnd(82)} ${example.title} - ${example.description}`
       );
     }
-    console.log('');
+    lines.push('');
   }
+  writeFileSync(1, `${lines.join('\n')}\n`);
   process.exit(0);
 }
 
@@ -180,6 +203,7 @@ function inferLanguage(examplePath) {
   if (ext === '.cpp' || ext === '.cc' || ext === '.cxx') return 'cpp';
   if (ext === '.go') return 'go';
   if (ext === '.rs') return 'rust';
+  if (ext === '.lisp') return 'lisp';
   return null;
 }
 
@@ -464,6 +488,89 @@ replace github.com/ax-llm/ax/packages/go => ${escapeGoModPath(outDir)}
   });
   if (compileOnly) return;
   run(goBin, [...rest], { cwd: repoRoot, env });
+}
+
+async function runLisp(examplePath, rest) {
+  // The Common Lisp port is a hand-written native package rather than a
+  // generated one, so there is nothing to emit first: the runner only has to
+  // put packages/lisp on ASDF's registry and load the example.
+  // AX_LISP_PACKAGE_DIR points the runner at another checkout of the native
+  // package. The committed packages/lisp is the default; the override exists
+  // because the full port is still landing, so an example can be verified
+  // against an integrated tree before that tree is committed.
+  const outDir = env.AX_LISP_PACKAGE_DIR
+    ? path.resolve(repoRoot, env.AX_LISP_PACKAGE_DIR)
+    : languagePackageDir('lisp');
+  if (!existsSync(path.join(outDir, 'axllm.asd'))) {
+    throw new Error(
+      `No axllm.asd under ${outDir}; set AX_LISP_PACKAGE_DIR to a checkout of packages/lisp.`
+    );
+  }
+  const sbcl = findCommand(['sbcl'], ['--version']);
+  if (!sbcl) {
+    throw new Error(
+      'SBCL not found. Install sbcl and the Quicklisp/distribution systems listed in packages/lisp/README.md.'
+    );
+  }
+
+  const loader = [
+    '(require :asdf)',
+    // Dependency compilation may legitimately redefine its own macros; the
+    // warning gate below covers Ax and the example, not the dependencies.
+    `(dolist (system '("yason" "cl-ppcre" "drakma" "cl-base64" "cffi" "puri" "ironclad" "local-time" "sqlite")) (asdf:load-system system))`,
+    `(push ${lispPathname(`${outDir}/`)} asdf:*central-registry*)`,
+    '(asdf:load-system "axllm")',
+  ];
+
+  // compile-file writes its fasl beside the source by default, which would
+  // litter the public example tree. Send it to a scratch directory instead and
+  // delete that directory afterwards. The directory name is unique per run:
+  // the gate compiles every example, and two concurrent invocations sharing one
+  // scratch path would delete each other's output file.
+  const scratchDir = compileOnly
+    ? await mkdtemp(path.join(tmpdir(), 'ax-lisp-compile-'))
+    : null;
+  const exampleForm = compileOnly
+    ? // Compile without running, with every warning fatal, so an example that
+      // names an API the port does not have fails here instead of at a
+      // provider call.
+      `(handler-bind ((warning (lambda (c) (error "example warning: ~A" c)))) (multiple-value-bind (fasl warnings failure) (compile-file ${lispPathname(examplePath)} :output-file ${lispPathname(path.join(scratchDir, 'example.fasl'))} :verbose nil :print nil) (declare (ignore fasl)) (when (or warnings failure) (uiop:quit 1))))`
+    : `(load ${lispPathname(examplePath)})`;
+
+  const args = [
+    '--noinform',
+    '--disable-debugger',
+    '--no-sysinit',
+    '--no-userinit',
+  ];
+  for (const form of [...loader, exampleForm]) args.push('--eval', form);
+  args.push('--quit');
+  if (!scratchDir) {
+    run(sbcl, args, {
+      cwd: repoRoot,
+      env: { ...env, AX_EXAMPLE_ARGS: rest.join(' ') },
+    });
+    return;
+  }
+  // `run` calls process.exit on a nonzero status, so a failed compile would
+  // never reach a finally block. Spawn directly here, clean up, and only then
+  // propagate the failure.
+  const result = spawnSync(sbcl, args, {
+    stdio: 'inherit',
+    cwd: repoRoot,
+    env: { ...env, AX_EXAMPLE_ARGS: rest.join(' ') },
+  });
+  await rm(scratchDir, { recursive: true, force: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
+
+function lispPathname(value) {
+  // A `#p"..."` literal is Lisp source, so a path containing a double quote or
+  // a backslash has to be escaped rather than interpolated raw. Windows
+  // separators are normalised first so the literal stays a portable namestring.
+  const escaped = value.replace(/\\/g, '/').replace(/(["\\])/g, '\\$1');
+  return `#p"${escaped}"`;
 }
 
 function escapeGoModPath(value) {

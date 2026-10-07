@@ -45,10 +45,16 @@ compiled into verified generated Python, Java, C++, Go, and Rust libraries.
 | Go | `github.com/ax-llm/ax/packages/go`<br>`import ax "github.com/ax-llm/ax/packages/go"` | Installable with `go get`; opt-in `runtime/goja` actor runtime |
 | Rust | `axllm`<br>`use axllm::{ai, ax, agent, flow};` | Published on crates.io; protocol-first code runtime |
 
-An experimental [Common Lisp port](packages/lisp/README.md) is available as the
-`axllm` ASDF system for SBCL. It supports Core-generated signatures and schemas,
-synchronous typed generation, tools, and a Jiti proposer adapter. It is not a
-full AxIR backend and does not claim the feature parity of the languages above.
+A [Common Lisp port](packages/lisp/README.md) is available as the `axllm` ASDF
+system for SBCL. Providers and generation run in the Lisp process without a JavaScript bridge.
+It carries Core-generated signatures and schemas, typed generation and tools,
+agents with a code runtime, flows, optimizers, audio, MCP and event delivery.
+Its AxIR verification runs the shared conformance fixtures and native transport tests.
+JavaScript agent execution uses a separate Node.js worker. Its public examples are in the catalog:
+
+```bash
+npm run example -- lisp src/examples/lisp/generation/axgen-openai.lisp
+```
 
 ```mermaid
 flowchart LR
@@ -106,6 +112,7 @@ npm run example -- java src/examples/java/generation/BasicGenerationExample.java
 npm run example -- cpp src/examples/cpp/generation/basic_generation.cpp
 npm run example -- go src/examples/go/generation/basic_generation.go
 npm run example -- rust src/examples/rust/generation/basic_generation.rs
+npm run example -- lisp src/examples/lisp/generation/axgen-openai.lisp
 ```
 
 See [`src/examples/README.md`](src/examples/README.md) for runnable examples,
@@ -595,14 +602,16 @@ npm run example -- java src/examples/java/flows/SequentialFlowExample.java
 npm run example -- cpp src/examples/cpp/audio/speech_audio.cpp
 npm run example -- go src/examples/go/optimization/axgen_optimization.go
 npm run example -- rust src/examples/rust/generation/basic_generation.rs
+npm run example -- lisp src/examples/lisp/short-agents/agent-openai.lisp
 ```
 
-For the experimental Common Lisp package, run
-`sbcl --script packages/lisp/examples/generate.lisp`. See its
+Any example can be built without calling a provider by adding `--compile-only`.
+The Common Lisp package also keeps its original standalone scripts, run with
+`sbcl --script packages/lisp/examples/generate.lisp`; see its
 [ASDF setup and Jiti example](packages/lisp/README.md) first.
 
 `npm run example -- list` shows public provider-backed examples for TypeScript,
-Python, Java, C++, Go, and Rust. Public examples live under
+Python, Java, C++, Go, Rust, and Common Lisp. Public examples live under
 `src/examples/<language>/<group>/`, use `ax-example` metadata headers, call real
 providers, and read credentials from `.env`. Internal generated-package fixtures
 remain under `packages/<language>/examples` for AxIR verification, but the public

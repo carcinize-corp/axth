@@ -142,6 +142,17 @@ class AxMCPClient {
   std::string namespace_name() const;
   Value request(const std::string& method, Value params = Value::object());
   void set_elicitation_handler(std::function<Value(Value, Value)> handler);
+  // Installing a handler is what makes sampling available: the client
+  // advertises the sampling capability only while one is installed, and
+  // answers an inbound sampling/createMessage with -32601 otherwise. The
+  // sampling constructor option stays rejected, because a Value cannot
+  // carry a callable and a truthy flag would advertise a capability this
+  // client could not honour.
+  void set_sampling_handler(std::function<Value(Value, Value)> handler);
+  // The tool specifications as the server sent them, including the _meta an
+  // MCP App policy reads. to_function() and native_tools() return callable
+  // wrappers instead, which drop that metadata.
+  Value tool_specs() const;
   void set_tool_authorizer(std::function<std::optional<bool>(const AxMCPClient&, Value)> handler);
   std::string get_era() const { return state_->era_; }
   Value discover();
@@ -181,6 +192,7 @@ class AxMCPClient {
   std::map<int,std::function<void(Value)>> notification_listeners_;
   std::map<int,std::function<void(std::string)>> lifecycle_listeners_;
   std::function<Value(Value,Value)> elicitation_handler_;
+  std::function<Value(Value,Value)> sampling_handler_;
   std::function<std::optional<bool>(const AxMCPClient&, Value)> tool_authorizer_;
   bool initialized_=false;
   // Latest snapshot of each task this client has seen, by task id.
@@ -213,10 +225,70 @@ class AxMCPClient {
   void record_task(Value task, bool from_notification);
   Value listen_task_ids();
   Value handle_server_request(Value request);
+  // The handler a pending MRTR or task input request names, or an empty
+  // function when this client cannot answer that method.
+  std::function<Value(Value,Value)> pending_input_handler(const std::string& method) const;
   Tool tool_to_function(Value spec);
   Tool prompt_to_function(Value spec);
   Tool resource_to_function(Value spec);
   Tool resource_template_to_function(Value spec);
+};
+
+// MCP Apps host bridge.
+//
+// Core owns the policy: mcp_app_tool_meta reads a tool's ui metadata,
+// mcp_app_tool_visible_to decides whether a frame may call a tool,
+// mcp_app_resource_policy and mcp_app_csp_source_list build the sandbox and
+// Content-Security-Policy strings, mcp_app_resource_plan validates a resource
+// body, and mcp_app_view_message_plan turns an inbound frame message into an
+// action. Nothing in this class re-decides any of that.
+//
+// The host owns what Core cannot do: reading the resource over the client,
+// decoding a base64 body, and running its own callbacks. A callback that is
+// not installed is not a silent no-op: Core is told which ones exist through
+// the context, and answers the frame that the facility is disabled.
+class AxMCPAppBridge {
+ public:
+  struct Options {
+    // Delivers a host-to-frame message. Without it the frame hears nothing.
+    std::function<void(Value)> send_to_view;
+    std::function<void(std::string)> open_link;
+    std::function<void(Value)> send_message;
+    std::function<void(Value)> update_model_context;
+    std::function<void(Value)> log;
+    std::function<void(Value)> size_changed;
+    // Returns the mode the host grants, which need not be the one asked for.
+    std::function<std::string(std::string)> request_display_mode;
+    // Returning false denies the request before any effect runs.
+    std::function<bool(Value)> authorize;
+    Value host_capabilities;
+    Value host_context;
+  };
+  AxMCPAppBridge(AxMCPClient& client, const std::string& tool_name, Options options = Options());
+  AxMCPAppBridge(AxMCPClient& client, Value tool, Options options = Options());
+  // The validated resource for the host to render. Throws when the server's
+  // resource is not a usable App resource.
+  Value load_resource();
+  // The response to send back to the frame, or a null Value for a message
+  // that takes none. A failing notification throws, because there is no
+  // response to carry the reason.
+  Value handle_view_message(Value message);
+  void notify_tool_input(Value arguments);
+  void notify_tool_input_partial(Value arguments);
+  void notify_tool_result(Value result);
+  void notify_tool_cancelled(const std::string& reason);
+  void notify_host_context_changed(Value context);
+  void teardown(const std::string& reason);
+  bool initialized() const { return initialized_; }
+
+ private:
+  Value view_context() const;
+  void notify(const std::string& method, Value params);
+  AxMCPClient& client_;
+  Value tool_;
+  Options options_;
+  bool initialized_ = false;
+  long next_id_ = 1;
 };
 
 class AxUCPBinding {
@@ -481,6 +553,9 @@ class AxMCPScriptedTransport : public AxMCPTransport {
   void set_era(const std::string& era) override {era_=era;}
   void open_request_stream(Value message) override;
   void emit(Value message){if(!dispatch_inbound_request(message)&&handler_)handler_(std::move(message));}
+  // Queue one more scripted reply, for a test that cannot know every
+  // response it will need before the client starts running.
+  void push_response(Value response){responses_.push_back(std::move(response));}
   void set_protocol_version(const std::string& protocol_version) override;
   std::vector<Value> requests;
   std::vector<Value> notifications;

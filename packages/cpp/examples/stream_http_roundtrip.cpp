@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <mutex>
 #include <iostream>

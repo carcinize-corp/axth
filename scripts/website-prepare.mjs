@@ -282,13 +282,19 @@ await validateAcademyCourse(academyCourse, {
 });
 await validateAcademyLanguages(academyCourse, languages, { repoRoot });
 for (const language of languages) {
-  const skillPageSlugs = (inventory.languageSkills[language.id] ?? []).map(
-    (skill) => skillPageSlug(skill)
-  );
   for (const academyPage of buildAcademyPages(academyCourse, language, {
-    skillPageSlugs,
+    skillPageSlugs: (inventory.languageSkills[language.id] ?? []).map(
+      skillPageSlug
+    ),
   })) {
-    await writePage(academyPage.relPath, academyPage.page);
+    // The course is authored once in TypeScript call notation, so a language
+    // with its own spelling gets it applied here rather than in the course.
+    await writePage(academyPage.relPath, {
+      ...academyPage.page,
+      title: applyCallNotation(academyPage.page.title, language),
+      description: applyCallNotation(academyPage.page.description, language),
+      body: applyCallNotation(academyPage.page.body, language),
+    });
   }
 }
 
@@ -305,7 +311,7 @@ async function writeGeneratedDocPage(language, page) {
   }
 
   const context = await renderContext(language, page);
-  const body = renderTemplate(template, context);
+  const body = applyCallNotation(renderTemplate(template, context), language);
   const unresolved = [
     ...new Set(
       [...body.matchAll(/\{\{([a-zA-Z][a-zA-Z0-9_]*)\}\}/g)].map((m) => m[1])
@@ -317,8 +323,8 @@ async function writeGeneratedDocPage(language, page) {
     );
   }
   await writePage(`${language.id}/${page.slug}/_index.md`, {
-    title: page.title,
-    description: page.description,
+    title: applyCallNotation(page.title, language),
+    description: applyCallNotation(page.description, language),
     weight: page.weight,
     generated: true,
     language: language.id,
@@ -402,6 +408,9 @@ async function renderContext(language, page) {
   const snippets = language.snippets ?? {};
   const examples = inventory.examples[language.id] ?? [];
   const packageInventory = inventory.packages[language.id];
+  const typesafeSkill = (inventory.languageSkills[language.id] ?? []).find(
+    (skill) => skill.name.endsWith('-typesafe')
+  );
 
   const apiRows = apiRowsFor(language, subsystem, inventory);
   const context = {
@@ -505,7 +514,12 @@ async function renderContext(language, page) {
     aiServiceTierExample: snippetBlock(language, 'ai.serviceTier'),
     aiProviderStreamExample: snippetBlock(language, 'ai.providerStream'),
     aiTypesafeExample: snippetBlock(language, 'ai.typesafe'),
-    typesafeSkillPath: `/${language.id}/skills/ax-${language.id === 'typescript' ? '' : `${language.id}-`}typesafe/`,
+    typesafeSkillPath: typesafeSkill
+      ? `/${language.id}/skills/${skillPageSlug(typesafeSkill)}/`
+      : `${githubBlob}/src/ax/skills/ax-typesafe.md`,
+    typesafeSkillLabel: typesafeSkill
+      ? 'Typesafe/Jev skill'
+      : 'TypeScript Typesafe/Jev reference',
     aiCancellationExample: snippetBlock(language, 'ai.cancellation'),
     aiBalancerExample:
       language.id === 'typescript' ? snippetBlock(language, 'ai.balancer') : '',
@@ -593,11 +607,35 @@ async function writeLanguageReferencePage(language) {
     body: rewriteLanguageLinks(
       ensureMarkdownHeading(
         `${language.label} Full API Reference`,
-        stripFrontmatter(apiMarkdown)
+        addAPIReferenceAnchors(
+          stripFrontmatter(apiMarkdown),
+          inventory.packages[language.id].apiSections
+        )
       ),
       language
     ),
   });
+}
+
+// Use the canonical concept to distinguish symbols whose headings collide
+// (Rust's tool/Tool, C++'s two axllm::Tool entries, or Flow/flow). Keep Hugo's
+// existing heading IDs so previously published deep links still work.
+function addAPIReferenceAnchors(markdown, sections) {
+  const symbols = sections.flatMap((section) => section.symbols ?? []);
+  const anchors = new Set();
+  let index = 0;
+  const result = markdown.replace(/^### `([^`]+)`$/gm, (heading, name) => {
+    const symbol = symbols[index++];
+    if (!symbol || symbol.public_name !== name) {
+      throw new Error(`API heading does not match its manifest: ${name}`);
+    }
+    const anchor = `api-${slugify(symbol.canonical_name)}`;
+    if (anchors.has(anchor)) throw new Error(`Duplicate API anchor: ${anchor}`);
+    anchors.add(anchor);
+    return `<a id="${anchor}"></a>\n\n${heading}`;
+  });
+  if (index !== symbols.length) throw new Error('API headings are missing');
+  return result;
 }
 
 async function writeTypeScriptReferencePages(language) {
@@ -984,7 +1022,7 @@ function apiRowsFor(language, subsystem, inventory) {
         ...(symbol.examples ?? []),
       ],
       notes: symbol.notes ?? [],
-      href: `/${language.id}/api/reference/#${slugify(symbol.public_name)}`,
+      href: `/${language.id}/api/reference/#api-${slugify(symbol.canonical_name)}`,
     }))
   );
 }
@@ -1641,7 +1679,9 @@ function builtInSnippet(languageId, key) {
 }
 
 function generatedPackageSnippets(languageId) {
-  const commentPrefix = languageId === 'python' ? '#' : '//';
+  // A generated-language comment marker. Anything not listed uses the C-like
+  // `//`, which is right for Java, C++, Go and Rust.
+  const commentPrefix = { python: '#', lisp: ';;' }[languageId] ?? '//';
   const comments = (values) =>
     values.map((value) => `${commentPrefix} ${value}`);
   const snippets = {
@@ -2093,9 +2133,94 @@ function generatedPackageSnippets(languageId) {
         '// Group MCP tools under a namespace in the generated package agent config when using discovery.',
       ],
     },
+    lisp: {
+      default: [
+        '(asdf:load-system "axllm")',
+        '',
+        '(ax:ax "question:string -> answer:string")',
+      ],
+      'signatures.string': [
+        '(let ((sig (ax:parse-signature "question:string -> answer:string")))',
+        '  (ax:encode-json (ax:json-schema sig :side :output)))',
+      ],
+      'ai.openai': [
+        '(let ((client (ax:ai :name "openai" :model "gpt-5.4-mini"',
+        '                     :api-key (uiop:getenv "OPENAI_API_KEY")))',
+        '      (program (ax:ax "question:string -> answer:string")))',
+        '  (ax:forward program client (ax:object "question" "What is Ax?")))',
+      ],
+      'agents.minimal': [
+        '(ax:agent "question:string -> answer:string"',
+        '          :options (ax:object "runtime" (ax:object "language" "JavaScript")))',
+      ],
+      'optimize.axgen': [
+        '(ax:optimize-program program dataset',
+        '                     :engine (ax:make-gepa :reflection reflection :seed 7)',
+        '                     :client client',
+        '                     :options (ax:object "metric" #\'metric "maxMetricCalls" 40))',
+      ],
+      'mcp.scripted': [
+        ';; Any transport object works here; the scripted one is used by the',
+        ";; package's own MCP tests rather than by application code.",
+        '(let ((client (ax:make-mcp-client transport "name" "ax-lisp" "version" "0.1.0")))',
+        '  (ax:mcp-init client)',
+        '  (ax:mcp-call-tool client "echo" (ax:object "text" "hello")))',
+      ],
+      'mcp.stdio': [
+        '(let* ((transport (ax:make-mcp-stdio-transport',
+        '                   "npx" :arguments (list "-y" "@modelcontextprotocol/server-memory")))',
+        '       (client (ax:make-mcp-client transport "name" "ax-lisp" "version" "0.1.0")))',
+        '  (ax:mcp-init client))',
+      ],
+      'mcp.http': [
+        '(let* ((transport (ax:make-mcp-streamable-http-transport',
+        '                   "https://mcp.example.com/mcp"',
+        '                   :authentication (ax:mcp-bearer-authentication access-token)))',
+        '       (client (ax:make-mcp-client transport "name" "ax-lisp" "version" "0.1.0")))',
+        '  (ax:mcp-init client))',
+      ],
+      'mcp.capabilities': ['(ax:jget (ax:mcp-list-tools client) "tools")'],
+      'mcp.overrides': [
+        '(ax:make-mcp-client transport',
+        '                    "name" "ax-lisp" "version" "0.1.0"',
+        '                    "functionOverrides"',
+        '                    (vector (ax:object "name" "search_documents"',
+        '                                       "updates" (ax:object "name" "findDocs"))))',
+      ],
+      'mcp.axTools': [
+        ';; An MCP descriptor is already JSON Schema, so bridging it to a native',
+        ';; tool is a handler that forwards to the client.',
+        '(ax:ax "question:string -> answer:string"',
+        '       :tools (list (ax:tool :name name',
+        '                             :parameters (ax:jget descriptor "inputSchema")',
+        '                             :handler bridge-to-mcp)))',
+      ],
+      'mcp.agentFlat': [
+        '(ax:agent "request:string -> response:string"',
+        '          :options (ax:object "functions" bridged-mcp-tools',
+        '                              "functionDiscovery" ax:true))',
+      ],
+      'mcp.agentGrouped': [
+        '(ax:agent "request:string -> response:string"',
+        '          :options (ax:object',
+        '                    "functions" (vector',
+        '                                 (ax:object "namespace" "memory"',
+        '                                            "title" "Memory MCP"',
+        '                                            "selectionCriteria" "Persistent memory lookup."',
+        '                                            "functions" bridged-mcp-tools))',
+        '                    "functionDiscovery" ax:true))',
+      ],
+    },
   };
 
-  const base = snippets[languageId] ?? snippets.python;
+  // No cross-language fallback: borrowing Python's snippets for another
+  // language silently publishes code that does not compile there.
+  const base = snippets[languageId];
+  if (!base) {
+    throw new Error(
+      `generatedPackageSnippets has no native entry for language "${languageId}"; add one instead of falling back to another language.`
+    );
+  }
   return {
     ...base,
     'signatures.fluent': base['signatures.string'],
@@ -2663,6 +2788,19 @@ function renderTemplate(template, context) {
     if (Object.hasOwn(context, key)) return String(context[key]);
     return match;
   });
+}
+
+// Shared template prose and site-map titles name Ax concepts in TypeScript
+// call notation: `ai()`, `ax()`, `forward()`. A language may declare its own
+// spelling in its `callNotation` map, and only that language's pages change;
+// a language that declares nothing renders byte-identically to before.
+function applyCallNotation(text, language) {
+  const notation = language.callNotation;
+  if (!notation || typeof text !== 'string') return text;
+  const names = Object.keys(notation);
+  if (names.length === 0) return text;
+  const pattern = new RegExp(`\\b(${names.join('|')})\\(\\)`, 'g');
+  return text.replace(pattern, (match, name) => notation[name] ?? match);
 }
 
 function rewriteLanguageLinks(markdown, language) {

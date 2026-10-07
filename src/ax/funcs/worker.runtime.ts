@@ -2661,7 +2661,7 @@ export function axWorkerRuntime(config: AxWorkerRuntimeConfig): void {
       _detachedFnErrors.length = 0;
       const result = isAsync
         ? await _executeAsyncSnippet(code)
-        : _executeSyncSnippet(code);
+        : await _executeSyncSnippet(code);
       if (_fnPending.size > 0) {
         await _waitForPendingFnCalls();
       }

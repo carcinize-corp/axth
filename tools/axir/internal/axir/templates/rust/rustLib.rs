@@ -12448,11 +12448,18 @@ fn run_flow_mermaid_fixture(fixture: &Value) -> AxResult<()> {
             fixture.get("expected_rendered").unwrap_or(&Value::Null),
         );
     }
+    if fixture.get("operation").is_some_and(|value| !value.is_null()) && operation != "roundtrip" {
+        return Err(AxError::new("fixture", format!("unknown flow mermaid operation {operation}")));
+    }
     let document = fixture.get("document").and_then(Value::as_str).unwrap_or("");
     let first = flow_with_bindings(document, bindings.clone());
-    let expected = fixture.get("expected_rerendered").or_else(|| fixture.get("expected_rendered")).unwrap_or(&Value::Null);
-    expect_json_equal("flow mermaid render", &Value::String(first.to_string()), expected)?;
+    if let Some(expected_direction) = fixture.get("expected_direction") {
+        let ast = core_value_to_json(&_flow_mermaid_parse(&[CoreValue::from(document)])?);
+        expect_json_equal("flow mermaid source direction", &ast["direction"], expected_direction)?;
+    }
+    expect_json_equal("flow mermaid render", &Value::String(first.to_string()), fixture.get("expected_rendered").unwrap_or(&Value::Null))?;
     let second = flow_with_bindings(&first.to_string(), bindings);
+    let expected = fixture.get("expected_rerendered").or_else(|| fixture.get("expected_rendered")).unwrap_or(&Value::Null);
     expect_json_equal("flow mermaid canonical roundtrip", &Value::String(second.to_string()), expected)
 }
 

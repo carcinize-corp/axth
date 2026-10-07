@@ -1,0 +1,164 @@
+{
+  "name": "mcp legacy inbound sampling/createMessage",
+  "kind": "mcp",
+  "operation": "server_requests_sampling",
+  "source": {
+    "reference": ["src/ax/mcp/client.ts", "ir/axcore/mcp.axir"],
+    "note": "mcp_server_request_plan_full adds the has_sampling branch that the three-argument mcp_server_request_plan does not have; the three-argument form must keep answering -32601 so existing generated ports do not change behaviour."
+  },
+  "client_options": {
+    "era": "legacy"
+  },
+  "responses": [
+    {
+      "method": "initialize",
+      "result": {
+        "protocolVersion": "2025-11-25",
+        "capabilities": {},
+        "serverInfo": {
+          "name": "scripted-mcp",
+          "version": "1.0.0"
+        }
+      }
+    }
+  ],
+  "sampling_result": {
+    "role": "assistant",
+    "content": {
+      "type": "text",
+      "text": "sampled"
+    },
+    "model": "scripted-model",
+    "stopReason": "endTurn"
+  },
+  "server_requests": [
+    {
+      "jsonrpc": "2.0",
+      "id": "sampling-1",
+      "method": "sampling/createMessage",
+      "params": {
+        "messages": [
+          {
+            "role": "user",
+            "content": {
+              "type": "text",
+              "text": "summarize"
+            }
+          }
+        ],
+        "maxTokens": 64
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "sampling-2",
+      "method": "sampling/createMessage",
+      "params": {
+        "maxTokens": 64
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "sampling-3",
+      "method": "sampling/createMessage"
+    }
+  ],
+  "expected_responses": [
+    {
+      "jsonrpc": "2.0",
+      "id": "sampling-1",
+      "result": {
+        "role": "assistant",
+        "content": {
+          "type": "text",
+          "text": "sampled"
+        },
+        "model": "scripted-model",
+        "stopReason": "endTurn"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "sampling-2",
+      "error": {
+        "code": -32602,
+        "message": "MCP protocol violation: sampling/createMessage requires a messages array"
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": "sampling-3",
+      "error": {
+        "code": -32602,
+        "message": "MCP protocol violation: sampling/createMessage omitted params"
+      }
+    }
+  ],
+  "expected_handler_calls": 1,
+  "expected_handler_params": {
+    "messages": [
+      {
+        "role": "user",
+        "content": {
+          "type": "text",
+          "text": "summarize"
+        }
+      }
+    ],
+    "maxTokens": 64
+  },
+  "expected_context": {
+    "namespace": "scripted-mcp"
+  },
+  "expected_capabilities": {
+    "sampling": {
+      "context": {},
+      "tools": {}
+    }
+  },
+  "without_handler": {
+    "server_request": {
+      "jsonrpc": "2.0",
+      "id": "sampling-4",
+      "method": "sampling/createMessage",
+      "params": {
+        "messages": [],
+        "maxTokens": 8
+      }
+    },
+    "expected_response": {
+      "jsonrpc": "2.0",
+      "id": "sampling-4",
+      "error": {
+        "code": -32601,
+        "message": "Unsupported server request: sampling/createMessage"
+      }
+    },
+    "forbidden_capabilities": ["sampling"]
+  },
+  "legacy_plan_cases": [
+    {
+      "note": "the three-argument contract other ports call must not gain sampling",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "sampling-5",
+        "method": "sampling/createMessage",
+        "params": {
+          "messages": [],
+          "maxTokens": 8
+        }
+      },
+      "expected": {
+        "action": "respond",
+        "response": {
+          "jsonrpc": "2.0",
+          "id": "sampling-5",
+          "error": {
+            "code": -32601,
+            "message": "Unsupported server request: sampling/createMessage"
+          }
+        }
+      }
+    }
+  ]
+}

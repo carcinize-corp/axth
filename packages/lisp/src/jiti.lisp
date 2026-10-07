@@ -66,7 +66,8 @@
 Jiti remains responsible for authorization, evaluation and session lifecycle.
 OBSERVATION-LIMIT bounds diagnostics, not the current restart IDs.
 This does not implement Jiti's Responses/SSE chat transport."
-  (check-type client ai-client)
+  (unless (compute-applicable-methods #'ax-chat (list client (object) nil))
+    (error 'jiti-action-error :message "Jiti proposer requires an Ax chat service."))
   (unless (and (integerp observation-limit) (plusp observation-limit))
     (error 'jiti-action-error :message "Observation limit must be a positive integer."))
   (let ((program

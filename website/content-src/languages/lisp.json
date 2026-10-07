@@ -1,0 +1,675 @@
+{
+  "id": "lisp",
+  "label": "Common Lisp",
+  "shortLabel": "Lisp",
+  "fence": "lisp",
+  "packageName": "axllm",
+  "install": [
+    "sudo apt-get install sbcl cl-yason cl-ppcre cl-drakma \\",
+    "  cl-ironclad cl-base64 cl-cffi cl-puri cl-local-time cl-sqlite",
+    "git clone https://github.com/carcinize-corp/axth.git ax"
+  ],
+  "quickStartRun": {
+    "file": "quickstart.lisp",
+    "setup": ["export OPENAI_API_KEY=\"sk-...\""],
+    "run": ["sbcl --script quickstart.lisp"],
+    "output": ["sentiment: positive"]
+  },
+  "exampleRoot": "src/examples/lisp",
+  "academy": {
+    "unitExamples": {
+      "dspy": "src/examples/lisp/signatures/program-not-prompt.lisp",
+      "models-signatures": "src/examples/lisp/signatures/fluent-signatures.lisp",
+      "axgen": "src/examples/lisp/generation/axgen-openai.lisp",
+      "axflow": "src/examples/lisp/flows/flow-openai.lisp",
+      "axagent": "src/examples/lisp/short-agents/agent-openai.lisp",
+      "rlm": "src/examples/lisp/long-agents/runtime-context-fields.lisp",
+      "peek-context": "src/examples/lisp/long-agents/context-map-reuse.lisp",
+      "optimization": "src/examples/lisp/optimization/bootstrap-few-shot.lisp",
+      "mcp": "src/examples/lisp/mcp/mcp-stdio-tools.lisp",
+      "notifications": "src/examples/lisp/providers/event-notifications.lisp",
+      "production": "src/examples/lisp/providers/production-telemetry.lisp"
+    },
+    "capstoneExample": "src/examples/lisp/long-agents/capstone-research-desk.lisp",
+    "exerciseAnswers": {
+      "signature-semantic-contract": ["parse-signature", "s"],
+      "ai-providers-models": ["ai"],
+      "fluent-fields-validation": ["f", "signature-from-spec"],
+      "typed-tools": ["tool"],
+      "optimize-gen-flow": ["optimize-program", "make-gepa"]
+    },
+    "snippets": {
+      "flow": [
+        "(let ((pipeline (ax:flow (ax:object \"id\" \"outline.flow\"))))",
+        "  (ax:flow-execute pipeline \"outline\" (ax:ax \"topic:string -> outline:string\"))",
+        "  (ax:flow-execute pipeline \"polish\" (ax:ax \"outline:string -> answer:string\"))",
+        "  (ax:flow-returns pipeline (ax:object \"answer\" \"answer\"))",
+        "  (ax:forward pipeline client (ax:object \"topic\" \"Why condition handlers beat exceptions\")))"
+      ],
+      "rlm": [
+        ";; There is no separate RLM entry point: this is an ordinary agent with",
+        ";; three options. contextFields names the inputs that stay in the code",
+        ";; runtime rather than the prompt, contextPolicy says how aggressively to",
+        ";; summarise what does reach the model, and maxRuntimeChars caps how much",
+        ";; the actor may pull across in one turn.",
+        "(ax:agent \"task:string, logs:json -> findings:json[], overallHealth:string\"",
+        "          :options (ax:object",
+        "                    \"contextFields\" (vector \"logs\")",
+        "                    \"contextPolicy\" (ax:object \"preset\" \"lean\" \"budget\" \"balanced\")",
+        "                    \"maxRuntimeChars\" 12000",
+        "                    \"runtime\" (ax:object \"language\" \"JavaScript\")))",
+        "",
+        ";; The actor filters the bulk input in code, so only the evidence it",
+        ";; extracts is ever seen by the model.",
+        "(ax:agent-forward forensics client",
+        "                  (ax:object \"logs\" logs \"task\" task)",
+        "                  :options (ax:object \"runtime\" engine \"maxActorSteps\" 40))"
+      ],
+      "contextMap": [
+        ";; The persistent orientation: a small map built on the first question and",
+        ";; reused for every later one, instead of re-reading the whole input.",
+        "(ax:agent \"context:string, question:string -> answer:string, paths:string[]\"",
+        "          :options (ax:object",
+        "                    \"contextFields\" (vector \"context\")",
+        "                    \"contextPolicy\" (ax:object \"preset\" \"adaptive\" \"budget\" \"balanced\")",
+        "                    \"contextOptions\" (ax:object \"description\" index-description)",
+        "                    \"contextMap\" (ax:object \"maxChars\" 1800",
+        "                                           \"infiniteEvolve\" ax:false",
+        "                                           \"evolveSteps\" 1)",
+        "                    \"runtime\" (ax:object \"language\" \"JavaScript\")))"
+      ],
+      "memorySkills": [
+        ";; Memory is a first-class object a caller owns, so a run's history can be",
+        ";; tagged and rewound rather than rebuilt.",
+        "(let ((history (ax:memory)))",
+        "  (ax:memory-add-tag history \"before-tools\")",
+        "  (ax:memory-rewind-to-tag history \"before-tools\")",
+        "  (ax:memory-history history))",
+        "",
+        ";; An agent's own catalogue answers what it can reach and what it recalled.",
+        "(ax:agent-discover assistant request)",
+        "(ax:agent-callable-inventory assistant)"
+      ]
+    }
+  },
+  "apiKind": "axir",
+  "optimizeName": "ax:optimize-program",
+  "optimizeIntro": "Use `ax:optimize-program` with an engine: `ax:make-bootstrap-few-shot` mines demonstrations and `ax:make-gepa` searches one component against a metric. TypeScript also exposes the convenience `optimize()` helper; the Common Lisp port keeps the engine explicit.",
+  "callNotation": {
+    "ai": "ax:ai",
+    "ax": "ax:ax",
+    "agent": "ax:agent",
+    "flow": "ax:flow",
+    "s": "ax:parse-signature",
+    "fn": "ax:tool",
+    "forward": "ax:forward",
+    "streamingForward": "ax:program-streaming-forward",
+    "optimize": "ax:optimize-program",
+    "playbook": "ax:make-playbook",
+    "typesafe": "ax:ai :name \"typesafe\""
+  },
+  "apiReference": "/lisp/api/reference/",
+  "apiSections": {
+    "ai": ["AxAI"],
+    "ax": ["AxGen", "Tools"],
+    "s": ["Signatures"],
+    "agent": ["Agents And RLM", "Runtime Profiles", "MCP"],
+    "flow": ["Flow"],
+    "optimize": ["Optimizers"]
+  },
+  "snippets": {
+    "ai": {
+      "openai": {
+        "sourcePath": "src/examples/lisp/generation/axgen-openai.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          "(let ((client (ax:ai :name \"openai\" :model \"gpt-5.4-mini\" :api-key (api-key)))",
+          "      (program (ax:ax \"question:string -> answer:string, confidence:class \\\"high, medium, low\\\"\")))",
+          "  (multiple-value-bind (output usage)",
+          "      (ax:forward program client (ax:object \"question\" \"What is the capital of France?\"))",
+          "    (format t \"~&answer     : ~a~%\" (ax:jget output \"answer\"))",
+          "    (format t \"~&usage      : ~a~%\" (ax:encode-json usage))))"
+        ]
+      },
+      "claude": {
+        "requiresCredentials": true,
+        "code": [
+          ";; One client type, selected by profile name. ax:provider-profiles lists",
+          ";; the 50 profiles Core knows, including anthropic and the OpenAI ones.",
+          "(ax:ai :name \"anthropic\"",
+          "       :model \"claude-sonnet-5\"",
+          "       :api-key (uiop:getenv \"ANTHROPIC_API_KEY\"))"
+        ]
+      },
+      "compatible": {
+        "requiresCredentials": true,
+        "code": [
+          ";; :base-url points the OpenAI-compatible client at any compatible",
+          ";; endpoint. The default transport verifies HTTPS certificates and does",
+          ";; not follow redirects.",
+          "(ax:ai :name \"openai\"",
+          "       :model \"llama-3.3-70b\"",
+          "       :base-url \"http://localhost:11434/v1\"",
+          "       :api-key (uiop:getenv \"LOCAL_API_KEY\"))"
+        ]
+      },
+      "gemini": {
+        "requiresCredentials": true,
+        "code": [
+          ";; google-gemini is one of the named profiles, so it is the same ax:ai",
+          ";; factory and the same request contract as every other provider.",
+          "(let ((client (ax:ai :name \"google-gemini\"",
+          "                     :model \"gemini-3.5-flash\"",
+          "                     :api-key (uiop:getenv \"GOOGLE_APIKEY\"))))",
+          "  (ax:ax-service-name client))"
+        ]
+      },
+      "responses": {
+        "requiresCredentials": true,
+        "code": [
+          ";; openai-responses is a separate profile from openai, selected by name;",
+          ";; there is no per-provider client class to construct.",
+          "(let ((client (ax:ai :name \"openai-responses\"",
+          "                     :model \"gpt-5.4-mini\"",
+          "                     :api-key (uiop:getenv \"OPENAI_API_KEY\"))))",
+          "  (ax:ax-chat client (ax:object \"chat_prompt\"",
+          "                                (vector (ax:object \"role\" \"user\"",
+          "                                                   \"content\" \"Say hello.\")))))"
+        ]
+      },
+      "embeddings": {
+        "requiresCredentials": true,
+        "code": [
+          ";; ax:ax-embed is a generic on the service, so it takes the same request",
+          ";; object shape Core builds for every provider.",
+          "(let ((client (ax:ai :name \"openai\" :model \"text-embedding-3-small\"",
+          "                     :api-key (uiop:getenv \"OPENAI_API_KEY\"))))",
+          "  (ax:jget (ax:ax-embed client (ax:object \"texts\" (vector \"a sentence to embed\")))",
+          "           \"embeddings\"))"
+        ]
+      },
+      "cancellation": {
+        "code": [
+          ";; One token covers provider calls, retries, streams and rate-limiter",
+          ";; waits. The first reason wins and a cancelled call is not retried.",
+          "(let ((token (ax:make-cancellation-token)))",
+          "  (ax:rate-limiter-acquire limiter 1 :cancellation token)",
+          "  (ax:cancel token \"user stopped\")",
+          "  (handler-case",
+          "      (ax:forward program client inputs (ax:object \"cancellation\" token))",
+          "    (ax:provider-error (condition)",
+          "      (ax:provider-error-aborted-p condition))))"
+        ]
+      },
+      "thinking": {
+        "requiresCredentials": true,
+        "code": [
+          ";; A thinking budget is a modelConfig entry in the call options, and",
+          ";; ax:ax-features reports what the configured model actually supports",
+          ";; before you rely on one.",
+          "(ax:jget (ax:ax-features client) \"thinking\")",
+          "(ax:forward program client inputs",
+          "            (ax:object \"modelConfig\"",
+          "                       (ax:object \"thinkingTokenBudget\" \"high\"",
+          "                                  \"showThoughts\" ax:false)))"
+        ]
+      },
+      "catalog": {
+        "code": [
+          ";; Models and deployment profiles are separate catalogues.",
+          "(ax:supported-ai-models)",
+          "(ax:supported-ai-models \"audio\")",
+          "(ax:model-info \"openai\" \"gpt-5.4-mini\")",
+          ";; The summary audits catalogue coverage; it is not a model list.",
+          "(ax:model-catalog-summary)",
+          "(ax:provider-profiles)",
+          "(ax:encode-json (ax:ax-features client))",
+          ";; Package-level claims live in packages/lisp/axir-capabilities.json."
+        ]
+      },
+      "audio": {
+        "sourcePath": "src/examples/lisp/audio/speak-and-transcribe.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; ax:ax-speak and ax:ax-transcribe are generics on the service, so the",
+          ";; audio path needs no generator.",
+          "(let* ((speaker (ax:ai :name \"openai\" :model \"gpt-4o-mini-tts\" :api-key (api-key)))",
+          "       (spoken (ax:ax-speak speaker (ax:object \"text\" line \"voice\" \"alloy\" \"format\" \"mp3\"))))",
+          "  (ax:jget spoken \"mimeType\")",
+          "  (let ((listener (ax:ai :name \"openai\" :model \"gpt-4o-mini-transcribe\" :api-key (api-key))))",
+          "    (ax:jget (ax:ax-transcribe listener",
+          "                               (ax:object \"audio\" (ax:object \"data\" (ax:jget spoken \"data\")",
+          "                                                             \"format\" (ax:jget spoken \"format\"))))",
+          "             \"text\")))"
+        ]
+      },
+      "providerStream": {
+        "requiresCredentials": true,
+        "code": [
+          ";; ax:ax-stream is the provider-level stream. ax:program-streaming-forward",
+          ";; is the typed one, which folds the same deltas into signature fields.",
+          "(ax:ax-stream client",
+          "              (ax:object \"chat_prompt\"",
+          "                         (vector (ax:object \"role\" \"user\"",
+          "                                            \"content\" \"Say hello.\"))))"
+        ]
+      },
+      "serviceTier": {
+        "requiresCredentials": true,
+        "code": [
+          ";; serviceTier travels in modelConfig and reaches the provider as that",
+          ";; provider's own field; ax:ax-features lists the tiers a model accepts.",
+          "(ax:jget (ax:ax-features client) \"service_tiers\")",
+          "(ax:ax-chat client",
+          "            (ax:object \"chat_prompt\" prompt",
+          "                       \"model_config\" (ax:object \"serviceTier\" \"flex\")))"
+        ]
+      },
+      "typesafe": {
+        "requiresCredentials": true,
+        "code": [
+          ";; typesafe is a named provider profile here, so a Jev deployment is",
+          ";; reached through the ordinary factory. This package exports no native",
+          ";; System One question API, so use the profile through ax:ax-chat or a",
+          ";; typed program rather than looking for a typesafe-specific call.",
+          "(let ((client (ax:ai :name \"typesafe\"",
+          "                     :api-key (uiop:getenv \"TYPESAFE_APIKEY\"))))",
+          "  (ax:forward (ax:ax \"ticket:string -> urgent:boolean\") client",
+          "              (ax:object \"ticket\" ticket)))"
+        ]
+      }
+    },
+    "quickStart": [
+      "(require :asdf)",
+      "(asdf:load-asd (merge-pathnames \"ax/packages/lisp/axllm.asd\" (uiop:getcwd)))",
+      "(asdf:load-system \"axllm\")",
+      "",
+      "(let ((llm (ax:ai :name \"openai\" :model \"gpt-5.4-mini\"",
+      "                  :api-key (uiop:getenv \"OPENAI_API_KEY\")))",
+      "      (classify (ax:ax \"review:string -> sentiment:class \\\"positive, negative, neutral\\\"\")))",
+      "  (multiple-value-bind (output usage)",
+      "      (ax:forward classify llm (ax:object \"review\" \"Useful and boring in the best way.\"))",
+      "    (declare (ignore usage))",
+      "    (format t \"~&sentiment: ~a~%\" (ax:jget output \"sentiment\"))))"
+    ],
+    "dspy": ["(ax:ax \"question:string -> answer:string, confidence:number\")"],
+    "signature": [
+      "(ax:parse-signature \"email:string -> priority:class \\\"high, normal, low\\\"\")"
+    ],
+    "ax": ["(ax:ax \"question:string -> answer:string\")"],
+    "flow": [
+      "(let ((brief (ax:flow (ax:object \"id\" \"brief.flow\"))))",
+      "  (ax:flow-execute brief \"research\" (ax:ax \"topicText:string -> factList:string[]\"))",
+      "  (ax:flow-execute brief \"audience\" (ax:ax \"topicText:string -> audienceAngle:string\"))",
+      "  (ax:flow-execute brief \"join\"",
+      "                   (ax:ax \"factList:string[], audienceAngle:string -> briefText:string\"))",
+      "  (ax:flow-returns brief (ax:object \"briefText\" \"briefText\"))",
+      "  (format t \"~a~%\" (ax:flow-mermaid brief)))"
+    ],
+    "agent": ["(ax:agent \"question:string -> answer:string\")"],
+    "llm": [
+      "(ax:ai :name \"openai\" :model \"gpt-5.4-mini\"",
+      "       :api-key (uiop:getenv \"OPENAI_API_KEY\"))"
+    ],
+    "telemetry": {
+      "sourcePath": "src/examples/lisp/providers/production-telemetry.lisp",
+      "verified": true,
+      "requiresCredentials": true,
+      "code": [
+        ";; A budget, a redacting logger and a response cache: process-wide globals",
+        ";; plus per-call options, not a wrapper around the program.",
+        "(let ((tracker (ax:make-cost-tracker :max-tokens 20000))",
+        "      (previous (ax:get-global \"logger\")))",
+        "  (ax:set-global \"logger\" (ax:create-default-text-logger nil ax:true))",
+        "  (multiple-value-bind (output usage)",
+        "      (ax:forward program client inputs (ax:object \"cachingFunction\" #'caching-function))",
+        "    (declare (ignore output))",
+        "    (ax:track-tokens tracker (ax:jget usage \"total_tokens\") (ax:ai-model client)))",
+        "  (ax:cost-tracker-limit-reached-p tracker)",
+        "  (ax:set-global \"logger\" previous))"
+      ]
+    },
+    "optimize": {
+      "sourcePath": "src/examples/lisp/optimization/bootstrap-few-shot.lisp",
+      "verified": true,
+      "requiresCredentials": true,
+      "code": [
+        "(let ((artifact (ax:optimize-program",
+        "                 program tasks",
+        "                 :engine (ax:make-bootstrap-few-shot)",
+        "                 :client client",
+        "                 :options (ax:object \"metric\" #'exact-answer \"maxMetricCalls\" 8))))",
+        "  (ax:jget artifact \"changedComponents\"))"
+      ]
+    },
+    "playbook": {
+      "sourcePath": "src/examples/lisp/optimization/refine-and-playbook.lisp",
+      "verified": true,
+      "requiresCredentials": true,
+      "code": [
+        "(let ((playbook (ax:make-playbook :program program :teacher client",
+        "                                  :metric #'contains-expected)))",
+        "  (ax:playbook-evolve playbook tasks :metric #'contains-expected)",
+        "  (ax:playbook-json playbook))"
+      ]
+    }
+  },
+  "snippetGroups": {
+    "signatures": {
+      "string": {
+        "sourcePath": "src/examples/lisp/generation/validated-outputs.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          "(let ((signature (ax:parse-signature \"question:string -> answer:string\")))",
+          "  (ax:signature-string signature)",
+          "  (ax:encode-json (ax:json-schema signature :side :output :title \"Answer\")))"
+        ]
+      },
+      "fluent": {
+        "sourcePath": "src/examples/lisp/signatures/fluent-signatures.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          "(ax:signature-from-spec",
+          " (ax:s :description \"Extract a structured contact from free text.\"",
+          "       :inputs (ax:object \"note\" (ax:f \"string\" :description \"The raw note to read\"))",
+          "       :outputs (ax:object",
+          "                 \"name\" (ax:f \"string\")",
+          "                 \"email\" (ax:f \"string\" :email ax:true)",
+          "                 \"priority\" (ax:f \"class\" :options (vector \"high\" \"normal\" \"low\"))",
+          "                 \"topics\" (ax:f \"string\" :array ax:true))))"
+        ]
+      },
+      "validation": {
+        "sourcePath": "src/examples/lisp/signatures/fluent-signatures.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          ";; A constraint is a field option, so one record drives the schema, the",
+          ";; prompt and the correction turns. min, max, pattern and url are the same",
+          ";; kind of option as email and the class list.",
+          "(ax:f \"string\" :email ax:true)",
+          "(ax:f \"class\" :options (vector \"high\" \"normal\" \"low\"))",
+          "(ax:f \"string\" :array ax:true :description \"Each subject mentioned\")"
+        ]
+      },
+      "hybrid": {
+        "sourcePath": "src/examples/lisp/signatures/fluent-signatures.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; ax:ax takes a parsed signature as readily as a string, so a fluent",
+          ";; signature runs without being re-serialised.",
+          "(let* ((signature (ax:signature-from-spec spec))",
+          "       (program (ax:ax signature)))",
+          "  (ax:forward program client (ax:object \"note\" note)))"
+        ]
+      }
+    },
+    "tools": {
+      "basic": {
+        "sourcePath": "src/examples/lisp/generation/tools-and-traces.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          ";; A tool is a JSON request spec plus a Lisp handler. Ax validates the",
+          ";; model's arguments against the spec before the handler sees them.",
+          "(ax:tool :name \"lookup_stock\"",
+          "         :description \"Current stock level for one inventory item.\"",
+          "         :parameters (ax:object",
+          "                      \"type\" \"object\"",
+          "                      \"properties\" (ax:object \"item\" (ax:object \"type\" \"string\"))",
+          "                      \"required\" (vector \"item\"))",
+          "         :handler #'lookup-stock)"
+        ]
+      },
+      "standardSchema": [
+        ";; TypeScript owns the zod/valibot/arktype Standard Schema adapters.",
+        ";; Here a tool's :parameters is already JSON Schema, so a server's own",
+        ";; schema can be passed straight through.",
+        "(ax:tool :name \"lookupProduct\"",
+        "         :description \"Look up product inventory\"",
+        "         :parameters (ax:jget descriptor \"inputSchema\")",
+        "         :handler (lambda (arguments) (lookup-product arguments)))"
+      ],
+      "namespaces": [
+        ";; Group related callables under a namespace on the agent rather than in",
+        ";; the tool name, so the actor sees kb.notes instead of kb_notes.",
+        "(ax:agent-add-child writer \"kb\" \"notes\" researcher)",
+        "(ax:agent-callable-inventory writer)"
+      ],
+      "ax": {
+        "sourcePath": "src/examples/lisp/generation/tools-and-traces.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          "(let ((program (ax:ax \"question:string -> answer:string\"",
+          "                      :tools (list stock-tool)",
+          "                      :description \"Answer inventory questions using lookup_stock.\")))",
+          "  (ax:forward program client (ax:object \"question\" \"How many sprockets are left?\"))",
+          "  ;; Both records belong to the program, so a run audits without a proxy.",
+          "  (ax:generator-function-call-traces program))"
+        ]
+      },
+      "agentFlat": {
+        "sourcePath": "src/examples/lisp/short-agents/delegating-agent.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          "(let ((assistant (ax:agent \"message:string -> reply:string\")))",
+          "  (ax:agent-add-child assistant \"research\" \"notes\" researcher)",
+          "  (ax:agent-callable-inventory assistant))"
+        ]
+      },
+      "agentGroups": [
+        ";; The inventory the actor is told about is the thing to inspect when a",
+        ";; delegation does not happen: namespace plus name is the callable.",
+        "(ax:encode-json (ax:agent-callable-inventory writer))"
+      ]
+    },
+    "flow": {
+      "branch": {
+        "sourcePath": "src/examples/lisp/flows/branching-flow.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; A data predicate reads a node's result without a callback: nodeName plus",
+          ";; the field, compared against value.",
+          "(ax:flow-branch triage \"route\"",
+          "                (ax:object \"nodeName\" \"classify\" \"field\" \"urgent\" \"value\" \"yes\")",
+          "                (vector",
+          "                 (ax:object \"when\" ax:true",
+          "                            \"steps\" (vector (ax:flow-step",
+          "                                             \"map\" \"page\"",
+          "                                             (lambda (state)",
+          "                                               (ax:object \"route\" \"page-on-call\"",
+          "                                                          \"report\" (ax:jget state \"report\"))))))",
+          "                 (ax:object \"when\" ax:false",
+          "                            \"steps\" (vector (ax:flow-step",
+          "                                             \"map\" \"queue\"",
+          "                                             (lambda (state)",
+          "                                               (ax:object \"route\" \"backlog\"",
+          "                                                          \"report\" (ax:jget state \"report\"))))))))"
+        ]
+      },
+      "parallel": {
+        "sourcePath": "src/examples/lisp/flows/parallel-flow-mermaid.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; Two nodes that read the same field and write different ones share a",
+          ";; parallel group. Core plans the group; the host dispatches it.",
+          "(ax:flow-execute review \"risks\" (ax:ax \"proposal:string -> risks:string\")",
+          "                 (ax:object \"reads\" (vector \"proposal\") \"writes\" (vector \"risksResult\")))",
+          "(ax:flow-execute review \"benefits\" (ax:ax \"proposal:string -> benefits:string\")",
+          "                 (ax:object \"reads\" (vector \"proposal\") \"writes\" (vector \"benefitsResult\")))",
+          "(ax:jget (ax:flow-plan review) \"parallelGroups\")"
+        ]
+      },
+      "refine": {
+        "sourcePath": "src/examples/lisp/optimization/refine-and-playbook.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; Refinement samples the program until the reward clears the threshold.",
+          "(let ((refined (ax:refine program",
+          "                          :rounds 2 :samples-per-round 2 :threshold 1",
+          "                          :reward-fn (lambda (output) (score output)))))",
+          "  (ax:forward refined client inputs)",
+          "  (ax:program-attempts refined))"
+        ]
+      }
+    },
+    "agents": {
+      "streaming": {
+        "code": [
+          ";; The sink takes one JSON envelope in Ax's delta shape: \"version\",",
+          ";; \"index\" and \"delta\". Merge each index's deltas, where strings and",
+          ";; arrays append and anything else replaces, and start over when the",
+          ";; version changes, because that means a retry restarted the output.",
+          "(ax:agent-streaming-forward",
+          " assistant client (ax:object \"question\" question)",
+          " (lambda (envelope)",
+          "   (format t \"~a\" (ax:jget (ax:jget envelope \"delta\") \"answer\")))",
+          " :options (ax:object \"runtime\" engine))"
+        ]
+      }
+    },
+    "mcp": {
+      "stdio": {
+        "sourcePath": "src/examples/lisp/mcp/mcp-stdio-tools.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          ";; The stdio transport launches the server as a child process; nothing in",
+          ";; the command is re-parsed by a shell.",
+          "(let* ((argv (uiop:split-string (mcp-command) :separator \" \"))",
+          "       (transport (ax:make-mcp-stdio-transport (first argv) :arguments (rest argv)))",
+          "       (mcp (ax:make-mcp-client transport \"name\" \"ax-lisp-example\" \"version\" \"0.1.0\")))",
+          "  (unwind-protect (ax:jget (ax:mcp-list-tools mcp) \"tools\")",
+          "    (ax:mcp-close mcp)))"
+        ]
+      },
+      "http": [
+        ";; The endpoint passes the SSRF gate at construction, so a bad endpoint",
+        ";; fails before any request is built.",
+        "(let ((transport (ax:make-mcp-streamable-http-transport",
+        "                  \"https://mcp.example.com/mcp\"",
+        "                  :authentication (ax:mcp-bearer-authentication access-token))))",
+        "  (ax:mcp-init (ax:make-mcp-client transport \"name\" \"ax-lisp\" \"version\" \"0.1.0\")))"
+      ],
+      "oauth": [
+        ";; The HTTP transport takes one authentication strategy or a list of them,",
+        ";; plus :oauth for the portable middle tier and :dpop for proof-of-",
+        ";; possession. Credentials never appear in a provider error.",
+        "(ax:make-mcp-streamable-http-transport",
+        " endpoint",
+        " :oauth oauth-options",
+        " :dpop (ax:make-mcp-dpop-factory :private-key key :public-jwk jwk))"
+      ],
+      "capabilities": {
+        "sourcePath": "src/examples/lisp/mcp/mcp-stdio-tools.lisp",
+        "verified": true,
+        "requiresCredentials": false,
+        "code": [
+          "(let ((tools (ax:jget (ax:mcp-list-tools mcp) \"tools\")))",
+          "  (format t \"~&tools      : ~d~%\" (length tools))",
+          "  (loop for tool across tools",
+          "        do (format t \"~&  ~a: ~a~%\" (ax:jget tool \"name\") (ax:jget tool \"description\"))))"
+        ]
+      },
+      "native": {
+        "sourcePath": "src/examples/lisp/mcp/mcp-tools-in-generation.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; An MCP tool and an Ax tool are the same idea with different wire",
+          ";; formats, so bridging them is a handler that forwards to the client.",
+          "(ax:tool :name name",
+          "         :description description",
+          "         :parameters (ax:jget descriptor \"inputSchema\")",
+          "         :handler (lambda (arguments)",
+          "                    (ax:tool-result-text (ax:mcp-call-tool mcp name arguments))))"
+        ]
+      },
+      "axTools": {
+        "sourcePath": "src/examples/lisp/mcp/mcp-tools-in-generation.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          "(let ((program (ax:ax \"question:string -> answer:string\"",
+          "                      :tools bridged-mcp-tools",
+          "                      :description \"Use the available tools when they help.\")))",
+          "  (ax:forward program client (ax:object \"question\" question))",
+          "  (ax:generator-function-call-traces program))"
+        ]
+      },
+      "agentFlat": [
+        ";; An agent reaches MCP tools the same way a generator does: bridge each",
+        ";; descriptor to an ax:tool and pass them in the agent's options.",
+        "(ax:agent \"request:string -> response:string\"",
+        "          :options (ax:object \"functions\" bridged-mcp-tools",
+        "                              \"functionDiscovery\" ax:true))"
+      ],
+      "agentGrouped": [
+        ";; Discovery metadata follows the shared function-group shape.",
+        "(ax:agent \"request:string -> response:string\"",
+        "          :options (ax:object",
+        "                    \"functions\" (vector",
+        "                                 (ax:object \"namespace\" \"memory\"",
+        "                                            \"title\" \"Memory MCP\"",
+        "                                            \"selectionCriteria\" \"Persistent memory lookup.\"",
+        "                                            \"functions\" bridged-mcp-tools))",
+        "                    \"functionDiscovery\" ax:true))"
+      ],
+      "resourceWake": [
+        ";; An MCP event source publishes server notifications into the runtime's",
+        ";; inbox; the routes decide whether to observe, invalidate, wake or resume.",
+        ";; Identity must come from the host's authentication state, because a bare",
+        ";; MCP session is anonymous.",
+        "(let* ((source (ax:make-mcp-event-source",
+        "                mcp :namespace \"inventory\"",
+        "                    :identity-scope \"tenant:demo\"",
+        "                    :trust \"authenticated\"",
+        "                    :resource-subscriptions :all))",
+        "       (runtime (ax:make-event-runtime routes",
+        "                                       :targets (list target)",
+        "                                       :sources (list source))))",
+        "  (ax:event-runtime-start runtime))"
+      ]
+    },
+    "event": {
+      "wake": {
+        "sourcePath": "src/examples/lisp/providers/event-notifications.lisp",
+        "verified": true,
+        "requiresCredentials": true,
+        "code": [
+          ";; A declarative mapping needs a signature, so the envelope is validated",
+          ";; into the program's inputs instead of trusted.",
+          "(let* ((target (ax:event-target",
+          "                \"triage\"",
+          "                :signature \"subject:string, body:string -> reply:string\"",
+          "                :input (ax:event-input-plan",
+          "                        :fields (ax:object \"subject\" (ax:event-path-data \"subject\")",
+          "                                           \"body\" (ax:event-path-data \"body\")))",
+          "                :sinks (list sink)",
+          "                :retry-safety \"safe\"",
+          "                :invoke (lambda (input context)",
+          "                          (declare (ignore context))",
+          "                          (ax:forward triage client input))))",
+          "       (runtime (ax:make-event-runtime",
+          "                 (list (ax:event-route \"inbound\" :action \"wake\"",
+          "                                       :types (list \"mail.received\")",
+          "                                       :target target))",
+          "                 :targets (list target))))",
+          "  (ax:event-runtime-start runtime)",
+          "  (ax:event-runtime-publish runtime envelope)",
+          "  (ax:event-runtime-run-due runtime))"
+        ]
+      }
+    }
+  }
+}

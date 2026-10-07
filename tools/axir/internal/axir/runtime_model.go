@@ -397,6 +397,7 @@ func BuildRuntimeModel(core Module) (AxRuntimeModel, error) {
 				CollectionPolicy: "serde-json-at-dynamic-boundaries",
 				ErrorPolicy:      "result-error-public-boundary",
 			},
+			"lisp": LispTargetIdiom(),
 		},
 	}, nil
 }

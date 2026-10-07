@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { readSkillMirrorSources } from '../../scripts/skill-mirrors.mjs';
 import {
   buildAcademyPages,
   validateAcademyCourse,
@@ -39,7 +40,41 @@ import {
 } from '../static/js/academy-engine.js';
 
 const now = Date.parse('2026-07-15T12:00:00.000Z');
-const languageIds = ['typescript', 'python', 'java', 'cpp', 'go', 'rust'];
+// The site map is the list of languages the site actually generates, so a new
+// language is covered by these tests the moment it is added rather than when
+// someone remembers to extend a literal here.
+const languageIds = JSON.parse(
+  await readFile('website/content-src/site-map.json', 'utf8')
+).languages;
+
+// The same inventory website-prepare publishes skill pages from, so the tests
+// cannot agree with a wrong answer the builder invented.
+const skillCatalogs = await readSkillMirrorSources(process.cwd(), languageIds);
+
+function slugify(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function publishedSkillSlugs(languageId) {
+  return (skillCatalogs[languageId] ?? []).map((skill) => slugify(skill.name));
+}
+
+function academyPagesFor(language) {
+  return buildAcademyPages(academyCourse, language, {
+    skillPageSlugs: publishedSkillSlugs(language.id),
+  });
+}
+
+function skillHrefs(html, languageId) {
+  return [
+    ...html.matchAll(
+      new RegExp(`/${languageId}/skills/([A-Za-z0-9._-]+)/`, 'g')
+    ),
+  ].map((match) => match[1]);
+}
 
 async function readLanguages() {
   return Promise.all(
@@ -106,10 +141,10 @@ test('every supported language generates a native, complete Academy', async () =
   const result = await validateAcademyLanguages(academyCourse, languages, {
     repoRoot: process.cwd(),
   });
-  assert.deepEqual(result, { languageCount: 6 });
+  assert.deepEqual(result, { languageCount: languageIds.length });
 
   for (const language of languages) {
-    const pages = buildAcademyPages(academyCourse, language);
+    const pages = academyPagesFor(language);
     assert.equal(pages.length, 71);
     assert.ok(
       pages.every((page) => page.relPath.startsWith(`${language.id}/academy/`))
@@ -128,7 +163,23 @@ test('every supported language generates a native, complete Academy', async () =
     assert.ok(firstLesson.page.body.includes('OPENAI_APIKEY'));
     assert.ok(firstLesson.page.body.includes('academy-api-chip">ax()'));
     assert.ok(firstLesson.page.body.includes('Source on GitHub'));
-    assert.ok(!firstLesson.page.body.includes('src/ax/skills/'));
+    if (language.id === 'typescript') {
+      // Every TypeScript skill is published, so a lesson never needs to fall
+      // back to the repository file.
+      assert.ok(!firstLesson.page.body.includes('src/ax/skills/'));
+    } else {
+      // A language without a skill for that subsystem keeps the reference, but
+      // only as a real GitHub document: a bare repo path must not leak into
+      // the lesson, and a guessed /skills/ route must never appear.
+      const bareRepoPath = firstLesson.page.body
+        .replaceAll('https://github.com/ax-llm/ax/blob/main/src/ax/skills/', '')
+        .includes('src/ax/skills/');
+      assert.ok(!bareRepoPath, 'lesson leaked a bare src/ax/skills/ path');
+      const published = new Set(publishedSkillSlugs(language.id));
+      for (const slug of skillHrefs(firstLesson.page.body, language.id)) {
+        assert.ok(published.has(slug), `unpublished skill link ${slug}`);
+      }
+    }
     const dashboard = pages[0].page.body;
     assert.equal(pages[0].page.title, academyCourse.courseTitle);
     assert.ok(dashboard.includes(`<h1>${academyCourse.courseTitle}.</h1>`));
@@ -158,38 +209,6 @@ test('every supported language generates a native, complete Academy', async () =
   }
 });
 
-test('lesson source links use published skill pages and fall back to the source file', async () => {
-  const languages = await readLanguages();
-  const cpp = languages.find((language) => language.id === 'cpp');
-  // C++ publishes a signature skill page but no MCP skill page.
-  const pages = buildAcademyPages(academyCourse, cpp, {
-    skillPageSlugs: ['ax-cpp-signature'],
-  });
-  const lessonBody = (topicId) =>
-    pages.find((page) => page.relPath.includes(`/topics/${topicId}/`)).page
-      .body;
-
-  const published = lessonBody('programs-not-prompts');
-  assert.ok(published.includes('href="/cpp/skills/ax-cpp-signature/"'));
-  assert.ok(!published.includes('href="/cpp/skills/ax-signature/"'));
-
-  const missing = lessonBody('mcp-attach');
-  assert.ok(!missing.includes('/cpp/skills/ax-cpp-mcp/'));
-  assert.ok(!missing.includes('/cpp/skills/ax-mcp/'));
-  assert.ok(
-    missing.includes(
-      '<a href="https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-mcp.md">MCP clients and native capabilities (source on GitHub)</a>'
-    )
-  );
-
-  // Without a published-page list the builder keeps linking skill pages, which
-  // is what the Academy engine tests and ad-hoc builds rely on.
-  const unscoped = buildAcademyPages(academyCourse, cpp).find((page) =>
-    page.relPath.includes('/topics/mcp-attach/')
-  ).page.body;
-  assert.ok(unscoped.includes('href="/cpp/skills/ax-cpp-mcp/"'));
-});
-
 test('lesson presentation aligns breadcrumbs and hides unused feedback', async () => {
   const css = await readFile('website/static/css/site.css', 'utf8');
   assert.match(
@@ -199,10 +218,103 @@ test('lesson presentation aligns breadcrumbs and hides unused feedback', async (
   assert.match(css, /\.academy-feedback\[hidden\]\s*\{[^}]*display:\s*none/s);
 });
 
+test('every Academy skill link points at a skill that language publishes', async () => {
+  const languages = await readLanguages();
+  const dead = [];
+  const linked = [];
+  for (const language of languages) {
+    const published = new Set(publishedSkillSlugs(language.id));
+    for (const page of academyPagesFor(language)) {
+      for (const slug of skillHrefs(page.page.body, language.id)) {
+        linked.push(`${language.id}:${slug}`);
+        if (!published.has(slug)) {
+          dead.push(`${page.relPath} -> /${language.id}/skills/${slug}/`);
+        }
+      }
+    }
+  }
+  assert.deepEqual(dead, []);
+  // The lessons must still carry skill links where a skill exists, or this
+  // test would pass by linking nothing at all.
+  assert.ok(linked.length > 100, `only ${linked.length} skill links`);
+  assert.ok(
+    linked.some((entry) => entry.startsWith('typescript:ax-')),
+    'TypeScript lessons lost their own skill links'
+  );
+  assert.ok(
+    linked.some((entry) => /^rust:ax-rust-/.test(entry)),
+    'generated languages lost their per-language skill links'
+  );
+});
+
+test('a subsystem with no skill in a language keeps its source reference', async () => {
+  const languages = await readLanguages();
+  const rust = languages.find((language) => language.id === 'rust');
+  const published = new Set(publishedSkillSlugs('rust'));
+  // Measured gap: the MCP and event-runtime skills are published for
+  // TypeScript but not for the generated packages.
+  assert.ok(!published.has('ax-rust-mcp'));
+  assert.ok(!published.has('ax-rust-event-runtime'));
+
+  const bodies = academyPagesFor(rust)
+    .map((page) => page.page.body)
+    .join('');
+  assert.ok(!bodies.includes('/rust/skills/ax-rust-mcp/'));
+  assert.ok(!bodies.includes('/rust/skills/ax-mcp/'));
+  // The reference itself survives as the real document on GitHub.
+  assert.ok(
+    bodies.includes(
+      'https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-mcp.md'
+    )
+  );
+  assert.ok(bodies.includes('MCP clients and native capabilities'));
+});
+
+test('a language that publishes one unrelated skill links none of them', async () => {
+  const languages = await readLanguages();
+  const lisp = languages.find((language) => language.id === 'lisp');
+  if (!lisp) return;
+  assert.deepEqual(publishedSkillSlugs('lisp'), ['programming-with-ax-lisp']);
+  const bodies = academyPagesFor(lisp)
+    .map((page) => page.page.body)
+    .join('');
+  assert.deepEqual(skillHrefs(bodies, 'lisp'), []);
+  // Its single skill must not be used as a stand-in for every subsystem.
+  assert.ok(!bodies.includes('/lisp/skills/programming-with-ax-lisp/'));
+  assert.ok(
+    bodies.includes(
+      'https://github.com/ax-llm/ax/blob/main/src/ax/skills/ax-agent.md'
+    )
+  );
+});
+
+test('buildAcademyPages refuses to guess skill routes', async () => {
+  const languages = await readLanguages();
+  const language = languages[0];
+  assert.throws(
+    () => buildAcademyPages(academyCourse, language),
+    /needs the published skill slugs/
+  );
+  assert.throws(
+    () =>
+      buildAcademyPages(academyCourse, language, {
+        skillPageSlugs: 'ax-agent',
+      }),
+    /must be an array or a Set/
+  );
+  // A Set is accepted as readily as an array.
+  assert.equal(
+    buildAcademyPages(academyCourse, language, {
+      skillPageSlugs: new Set(publishedSkillSlugs(language.id)),
+    }).length,
+    71
+  );
+});
+
 test('language Academies keep progress in separate storage namespaces', async () => {
   const languages = await readLanguages();
   const manifests = languages.map((language) => {
-    const page = buildAcademyPages(academyCourse, language)[0];
+    const page = academyPagesFor(language)[0];
     const json = page.page.body.match(
       /<script type="application\/json" id="academy-course-data" data-pagefind-ignore>(.*)<\/script>/
     )?.[1];

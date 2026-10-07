@@ -58,6 +58,11 @@ impl AxMCPTokenStore for AxMCPFixtureTokenStore {
 
 pub type AxMCPToolAuthorizer = Arc<dyn Fn(&AxMCPClient, Value) -> AxResult<Option<bool>> + Send + Sync>;
 pub type AxMCPElicitationHandler = Arc<dyn Fn(Value, Value) -> AxResult<Value> + Send + Sync>;
+// A sampling handler is the client's own model call: the server asks for a
+// completion, the host runs it, and the result goes back on the wire. It is
+// optional, and the client advertises the sampling capability only when one
+// is installed.
+pub type AxMCPSamplingHandler = Arc<dyn Fn(Value, Value) -> AxResult<Value> + Send + Sync>;
 pub type AxMCPRequestHandler = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 
 pub trait AxMCPTransport: Send {
@@ -84,6 +89,14 @@ pub trait AxMCPTransport: Send {
     fn close_request_stream(&mut self) -> AxResult<()> { Ok(()) }
     fn close(&mut self) -> AxResult<()> { Ok(()) }
     fn sent_notifications(&self) -> Vec<Value> { Vec::new() }
+    /// Responses this transport has sent back for inbound server requests.
+    fn sent_responses(&self) -> Vec<Value> { Vec::new() }
+    /// Queue one more scripted response. A live transport answers from its
+    /// peer, so it refuses instead of pretending to accept a script.
+    fn script_response(&mut self, _response: Value) -> AxResult<()> { Err(AxError::new("mcp", "This MCP transport cannot be scripted")) }
+    /// Hand this transport an inbound server request as if the peer had sent
+    /// it, so the client's request handler answers it over the same path.
+    fn inject_server_request(&mut self, _request: Value) -> AxResult<()> { Err(AxError::new("mcp", "This MCP transport cannot inject a server request")) }
     fn sent_requests(&self)->Vec<Value>{Vec::new()}
     fn sent_request_headers(&self)->Vec<Map<String,Value>>{Vec::new()}
     fn sent_request_streams(&self)->Vec<Value>{Vec::new()}
@@ -145,6 +158,7 @@ pub struct AxMCPClient {
     subscription_ready:bool,
     catalog_revision:u64,
     elicitation_handler:Option<AxMCPElicitationHandler>,
+    sampling_handler:Option<AxMCPSamplingHandler>,
     tool_authorizer:Option<AxMCPToolAuthorizer>,
     initialized:bool,
     // Latest snapshot of each task this client has seen, by task id.
@@ -183,7 +197,7 @@ impl AxMCPClient {
             active_subscription_id:None,
             subscription_ready:false,
             catalog_revision:0,
-            elicitation_handler:None,tool_authorizer:None,
+            elicitation_handler:None,sampling_handler:None,tool_authorizer:None,
             initialized:false,
             tasks:Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -191,12 +205,19 @@ impl AxMCPClient {
 
     pub fn set_tool_authorizer(&mut self,handler:impl Fn(&AxMCPClient,Value)->AxResult<Option<bool>>+Send+Sync+'static){self.tool_authorizer=Some(Arc::new(handler));}
     pub fn set_elicitation_handler(&mut self,handler:impl Fn(Value,Value)->AxResult<Value>+Send+Sync+'static){self.elicitation_handler=Some(Arc::new(handler));}
+    /// Install the handler that answers `sampling/createMessage`. The client
+    /// advertises the sampling capability only while one is installed, and
+    /// answers -32601 for the request when it is not.
+    pub fn set_sampling_handler(&mut self,handler:impl Fn(Value,Value)->AxResult<Value>+Send+Sync+'static){self.sampling_handler=Some(Arc::new(handler));}
 
     pub fn init(&mut self) -> AxResult<()> {
         if self.initialized{return Ok(())}
-        if self.options.get("sampling").is_some_and(|value|!value.is_null()&&value!=&Value::Bool(false)){return Err(AxError::new("mcp","MCP sampling is not supported by the generated Rust client"))}
+        // A truthy "sampling" option is not a handler: a JSON option cannot run
+        // a model. Sampling is enabled by set_sampling_handler, so accepting the
+        // option would advertise a capability nothing can answer.
+        if self.options.get("sampling").is_some_and(|value|!value.is_null()&&value!=&Value::Bool(false)){return Err(AxError::new("mcp","MCP sampling requires a callable handler"))}
         self.transport.lock().unwrap().connect()?;
-        let request_options=self.options.clone();let request_elicitation=self.elicitation_handler.clone();let request_server_info=self.server_info.clone();self.transport.lock().unwrap().set_request_handler(Arc::new(move|request|ax_mcp_handle_server_request(&request_options,request_elicitation.as_ref(),&request_server_info,request)));
+        let request_options=self.options.clone();let request_elicitation=self.elicitation_handler.clone();let request_sampling=self.sampling_handler.clone();let request_server_info=self.server_info.clone();self.transport.lock().unwrap().set_request_handler(Arc::new(move|request|ax_mcp_handle_server_request(&request_options,request_elicitation.as_ref(),request_sampling.as_ref(),&request_server_info,request)));
         let inbound_messages=self.inbound_messages.clone();self.transport.lock().unwrap().set_message_handler(Arc::new(move|message|{inbound_messages.lock().unwrap().push(message)}));let inbound_lifecycle=self.inbound_lifecycle.clone();self.transport.lock().unwrap().set_lifecycle_handler(Arc::new(move|state|{inbound_lifecycle.lock().unwrap().push(state)}));
         let configured=self.options.get("era").and_then(Value::as_str).unwrap_or("auto");let key=self.transport.lock().unwrap().era_cache_key().unwrap_or_default();let cache=ax_mcp_era_cache();let cached=cache.lock().unwrap().get(&key).cloned();let stored=self.options.get("eraStore").and_then(Value::as_object).and_then(|store|store.get(&key)).and_then(Value::as_str);let resolution=core_mcp(&crate::mcp_resolve_known_era,&[json!(configured),json!(self.transport.lock().unwrap().era_hint()),json!(cached),json!(stored)])?;let resolved=resolution.get("era").and_then(Value::as_str).unwrap_or("modern");
         if !resolution.get("probe").and_then(Value::as_bool).unwrap_or(false){if resolved=="legacy"{self.initialize_legacy()?}else{self.apply_era("modern");let discovery=self.request_discovery()?;self.apply_discovery(discovery)?;self.refresh()?}self.remember_era(resolved);self.initialized=true;if resolved=="legacy"{return self.transport.lock().unwrap().start_listening()}return Ok(())}
@@ -294,7 +315,7 @@ impl AxMCPClient {
     // The recorded tasks a modern listener asks updates for, as TypeScript's
     // listener does when something listens for them.
     fn listen_task_ids(&self)->Vec<String>{if self.notification_listeners.lock().unwrap().is_empty()||!self.has_tasks_capability(){return Vec::new()}self.tasks.lock().unwrap().keys().cloned().collect()}
-    fn await_modern_task(&mut self,task_id:&str)->AxResult<Value>{let max=self.options.get("maxTaskPolls").and_then(Value::as_u64).unwrap_or(1000);for _ in 0..max{let task=self.get_task(task_id)?;let outcome=core_mcp(&crate::mcp_task_terminal_outcome,&[task])?;match outcome.get("kind").and_then(Value::as_str).unwrap_or_default(){"result"=>return Ok(outcome.get("result").cloned().unwrap_or(Value::Null)),"protocol_error"=>{let mut error=AxError::new("mcp",outcome.get("message").and_then(Value::as_str).unwrap_or("MCP task failed"));error.code=Some(outcome.get("code").map(ToString::to_string).unwrap_or_default());return Err(error)},"violation"|"failure"|"cancelled"=>return Err(AxError::new("mcp",outcome.get("message").and_then(Value::as_str).unwrap_or("MCP task failed"))),"input_required"=>{let fulfillment=core_mcp(&crate::mcp_mrtr_plan_fulfillment,&[outcome.get("inputRequests").cloned().unwrap_or_else(||json!({})),self.options.get("roots").cloned().unwrap_or(Value::Null),json!(self.elicitation_handler.is_some()),json!(false)])?;if fulfillment.get("ok").and_then(Value::as_bool)!=Some(true){return Err(AxError::new("mcp",fulfillment.get("message").and_then(Value::as_str).unwrap_or("MCP protocol violation")))}let mut responses=fulfillment.get("responses").and_then(Value::as_object).cloned().unwrap_or_default();for(key,pending)in fulfillment.get("pending").and_then(Value::as_object).cloned().unwrap_or_default(){let method=pending.get("method").and_then(Value::as_str).unwrap_or_default();let handler=self.elicitation_handler.as_ref().ok_or_else(||AxError::new("mcp",format!("MCP protocol violation: unsupported pending task input request method {method}")))?;if method!="elicitation/create"{return Err(AxError::new("mcp",format!("MCP protocol violation: unsupported pending task input request method {method}")))}responses.insert(key,handler(pending.get("params").cloned().unwrap_or_else(||json!({})),json!({"client":"AxMCPClient","namespace":self.namespace()}))?);}self.provide_task_input(task_id,Value::Object(responses))?},_=>{}}}Err(AxError::new("mcp",format!("MCP task {task_id} exceeded {max} polls")))}
+    fn await_modern_task(&mut self,task_id:&str)->AxResult<Value>{let max=self.options.get("maxTaskPolls").and_then(Value::as_u64).unwrap_or(1000);for _ in 0..max{let task=self.get_task(task_id)?;let outcome=core_mcp(&crate::mcp_task_terminal_outcome,&[task])?;match outcome.get("kind").and_then(Value::as_str).unwrap_or_default(){"result"=>return Ok(outcome.get("result").cloned().unwrap_or(Value::Null)),"protocol_error"=>{let mut error=AxError::new("mcp",outcome.get("message").and_then(Value::as_str).unwrap_or("MCP task failed"));error.code=Some(outcome.get("code").map(ToString::to_string).unwrap_or_default());return Err(error)},"violation"|"failure"|"cancelled"=>return Err(AxError::new("mcp",outcome.get("message").and_then(Value::as_str).unwrap_or("MCP task failed"))),"input_required"=>{let fulfillment=core_mcp(&crate::mcp_mrtr_plan_fulfillment,&[outcome.get("inputRequests").cloned().unwrap_or_else(||json!({})),self.options.get("roots").cloned().unwrap_or(Value::Null),json!(self.elicitation_handler.is_some()),json!(self.sampling_handler.is_some())])?;if fulfillment.get("ok").and_then(Value::as_bool)!=Some(true){return Err(AxError::new("mcp",fulfillment.get("message").and_then(Value::as_str).unwrap_or("MCP protocol violation")))}let mut responses=fulfillment.get("responses").and_then(Value::as_object).cloned().unwrap_or_default();for(key,pending)in fulfillment.get("pending").and_then(Value::as_object).cloned().unwrap_or_default(){let method=pending.get("method").and_then(Value::as_str).unwrap_or_default();let handler=match method{"elicitation/create"=>self.elicitation_handler.clone(),"sampling/createMessage"=>self.sampling_handler.clone(),_=>None};let Some(handler)=handler else{return Err(AxError::new("mcp",format!("MCP protocol violation: unsupported pending task input request method {method}")))};responses.insert(key,handler(pending.get("params").cloned().unwrap_or_else(||json!({})),json!({"client":"AxMCPClient","namespace":self.namespace()}))?);}self.provide_task_input(task_id,Value::Object(responses))?},_=>{}}}Err(AxError::new("mcp",format!("MCP task {task_id} exceeded {max} polls")))}
     fn tool_headers(&self,name:&str,args:&Value)->AxResult<Map<String,Value>>{let mut out=Map::new();if self.era.as_deref()!=Some("modern"){return Ok(out)}if let Some(tool)=self.tools.iter().find(|tool|tool.get("name").and_then(Value::as_str)==Some(name)){let bindings=core_mcp(&crate::mcp_param_header_bindings,&[tool.get("inputSchema").cloned().unwrap_or_else(||json!({}))])?;if let Some(values)=core_mcp(&crate::mcp_param_header_values,&[bindings,args.clone()])?.as_object(){out=values.clone()}}Ok(out)}
     pub fn list_prompts(&mut self, cursor: Option<&str>) -> AxResult<Value> { self.request("prompts/list", cursor_params(cursor)) }
     pub fn get_prompt(&mut self, name: &str, arguments: Value) -> AxResult<Value> { self.request_with_input_rounds("prompts/get", json!({"name": name, "arguments": if arguments.is_null() { json!({}) } else { arguments }}),Map::new()) }
@@ -370,6 +391,7 @@ impl AxMCPClient {
         let subscription_owners = self.subscription_owners.clone();
         let active_subscription_id = self.active_subscription_id.clone();
         let elicitation_handler = self.elicitation_handler.clone();
+        let sampling_handler = self.sampling_handler.clone();
         let tool_authorizer = self.tool_authorizer.clone();
         let initialized = self.initialized;
         let subscription_ready = self.subscription_ready;
@@ -394,6 +416,7 @@ impl AxMCPClient {
             client.subscription_owners = subscription_owners.clone();
             client.active_subscription_id = active_subscription_id.clone();
             client.elicitation_handler = elicitation_handler.clone();
+            client.sampling_handler = sampling_handler.clone();
             client.tool_authorizer = tool_authorizer.clone();
             client.initialized = initialized;
             client.subscription_ready = subscription_ready;
@@ -429,17 +452,19 @@ impl AxMCPClient {
         self.request_with_headers(method,params,Map::new(),true)
     }
 
-    fn request_with_input_rounds(&self,method:&str,base_params:Value,headers:Map<String,Value>)->AxResult<Value>{let mut params=base_params.clone();let max_rounds=self.options.get("maxInputRounds").cloned().unwrap_or(Value::Null);for round in 0usize..{let result=self.request_with_headers(method,params,headers.clone(),true)?;let plan=core_mcp(&crate::mcp_mrtr_plan_round,&[result.clone(),json!(self.era.as_deref().unwrap_or("legacy")),json!(method),json!(round),max_rounds.clone()])?;match plan.get("action").and_then(Value::as_str).unwrap_or_default(){"complete"=>return Ok(result),"violation"=>return Err(AxError::new("mcp",plan.get("message").and_then(Value::as_str).unwrap_or("MCP protocol violation"))),_=>{}}let mut input_responses=Value::Null;if plan.get("hasInputRequests").and_then(Value::as_bool)==Some(true){if let Some(requests)=plan.get("inputRequests").filter(|value|value.is_object()){let roots=self.options.get("roots").cloned().unwrap_or(Value::Null);let fulfillment=core_mcp(&crate::mcp_mrtr_plan_fulfillment,&[requests.clone(),roots,json!(self.elicitation_handler.is_some()),json!(false)])?;if fulfillment.get("ok").and_then(Value::as_bool)!=Some(true){return Err(AxError::new("mcp",fulfillment.get("message").and_then(Value::as_str).unwrap_or("MCP protocol violation")))}let mut responses=fulfillment.get("responses").and_then(Value::as_object).cloned().unwrap_or_default();for(key,pending)in fulfillment.get("pending").and_then(Value::as_object).cloned().unwrap_or_default(){let pending_method=pending.get("method").and_then(Value::as_str).unwrap_or_default();if pending_method!="elicitation/create"{return Err(AxError::new("mcp",format!("MCP protocol violation: unsupported pending MRTR input request method {pending_method}")))}let handler=self.elicitation_handler.as_ref().ok_or_else(||AxError::new("mcp","MCP protocol violation: server requested elicitation/create without a matching client handler"))?;responses.insert(key,handler(pending.get("params").cloned().unwrap_or_else(||json!({})),json!({"namespace":self.namespace()}))?);}input_responses=Value::Object(responses);}}let request_state=if plan.get("hasRequestState").and_then(Value::as_bool)==Some(true){plan.get("requestState").cloned().unwrap_or(Value::Null)}else{Value::Null};params=core_mcp(&crate::mcp_mrtr_next_params,&[base_params.clone(),input_responses,request_state])?;}unreachable!()}
+    fn request_with_input_rounds(&self,method:&str,base_params:Value,headers:Map<String,Value>)->AxResult<Value>{let mut params=base_params.clone();let max_rounds=self.options.get("maxInputRounds").cloned().unwrap_or(Value::Null);for round in 0usize..{let result=self.request_with_headers(method,params,headers.clone(),true)?;let plan=core_mcp(&crate::mcp_mrtr_plan_round,&[result.clone(),json!(self.era.as_deref().unwrap_or("legacy")),json!(method),json!(round),max_rounds.clone()])?;match plan.get("action").and_then(Value::as_str).unwrap_or_default(){"complete"=>return Ok(result),"violation"=>return Err(AxError::new("mcp",plan.get("message").and_then(Value::as_str).unwrap_or("MCP protocol violation"))),_=>{}}let mut input_responses=Value::Null;if plan.get("hasInputRequests").and_then(Value::as_bool)==Some(true){if let Some(requests)=plan.get("inputRequests").filter(|value|value.is_object()){let roots=self.options.get("roots").cloned().unwrap_or(Value::Null);let fulfillment=core_mcp(&crate::mcp_mrtr_plan_fulfillment,&[requests.clone(),roots,json!(self.elicitation_handler.is_some()),json!(self.sampling_handler.is_some())])?;if fulfillment.get("ok").and_then(Value::as_bool)!=Some(true){return Err(AxError::new("mcp",fulfillment.get("message").and_then(Value::as_str).unwrap_or("MCP protocol violation")))}let mut responses=fulfillment.get("responses").and_then(Value::as_object).cloned().unwrap_or_default();for(key,pending)in fulfillment.get("pending").and_then(Value::as_object).cloned().unwrap_or_default(){let pending_method=pending.get("method").and_then(Value::as_str).unwrap_or_default();let handler=match pending_method{"elicitation/create"=>self.elicitation_handler.clone(),"sampling/createMessage"=>self.sampling_handler.clone(),_=>None};let Some(handler)=handler else{return Err(AxError::new("mcp",format!("MCP protocol violation: unsupported pending MRTR input request method {pending_method}")))};responses.insert(key,handler(pending.get("params").cloned().unwrap_or_else(||json!({})),json!({"namespace":self.namespace()}))?);}input_responses=Value::Object(responses);}}let request_state=if plan.get("hasRequestState").and_then(Value::as_bool)==Some(true){plan.get("requestState").cloned().unwrap_or(Value::Null)}else{Value::Null};params=core_mcp(&crate::mcp_mrtr_next_params,&[base_params.clone(),input_responses,request_state])?;}unreachable!()}
 
     fn request_with_headers(&self,method:&str,params:Value,headers:Map<String,Value>,allow_version_retry:bool)->AxResult<Value>{let mut next=self.next_id.lock().unwrap();let id=next.to_string();*next+=1;drop(next);let mut request_params=params.clone();if self.era.as_deref()==Some("modern"){let version=self.negotiated_protocol_version.lock().unwrap().clone().unwrap_or_else(||"2026-07-28".into());let meta=core_mcp(&crate::mcp_build_request_meta,&[request_params.get("_meta").cloned().unwrap_or_else(||json!({})),json!(version),self.client_capabilities(),json!({"name":"AxMCPClient","title":"Ax MCP Client","version":"1.0.0"}),self.options.get("logLevel").cloned().unwrap_or(Value::Null),Value::Null,Value::Null])?;if !request_params.is_object(){request_params=json!({})}request_params["_meta"]=meta}mcp_check_cancelled(&self.invocation_context)?;let mut transport=loop{match self.transport.try_lock(){Ok(guard)=>break guard,Err(std::sync::TryLockError::WouldBlock)=>{mcp_check_cancelled(&self.invocation_context)?;thread::sleep(Duration::from_millis(10));},Err(_)=>return Err(AxError::new("mcp","MCP transport lock poisoned"))}};let response=transport.send_with_context(json!({"jsonrpc":"2.0","id":id,"method":method,"params":request_params}),headers.clone(),&self.invocation_context)?;drop(transport);if let Some(raw)=response.get("error"){let code=raw.get("code").and_then(Value::as_i64).unwrap_or_default();if self.era.as_deref()==Some("modern")&&allow_version_retry&&code==-32022{let version=core_mcp(&crate::mcp_select_mutual_version,&[raw.get("data").cloned().unwrap_or(Value::Null),json!(AX_MCP_SUPPORTED_PROTOCOL_VERSIONS)])?;if let Some(version)=version.as_str().filter(|value|!value.is_empty()){*self.negotiated_protocol_version.lock().unwrap()=Some(version.into());self.transport.lock().unwrap().set_protocol_version(version);return self.request_with_headers(method,params,headers,false)}}let mut error=AxError::new("mcp",raw.get("message").and_then(Value::as_str).unwrap_or("MCP JSON-RPC error"));error.code=Some(code.to_string());return Err(error)}let result=response.get("result").cloned().unwrap_or_else(||json!({}));if self.era.as_deref()==Some("modern"){if let Some(info)=result.get("_meta").and_then(|meta|meta.get("io.modelcontextprotocol/serverInfo")).filter(|info|info.get("name").and_then(Value::as_str).is_some()&&info.get("version").and_then(Value::as_str).is_some()){*self.server_info.lock().unwrap()=info.clone()}}Ok(result)}
 
     fn client_capabilities(&self) -> Value {
         let mut out = self.options.get("capabilities").cloned().unwrap_or_else(|| json!({}));
-        let has_elicitation=self.elicitation_handler.is_some();let derived=core_mcp(&crate::mcp_client_capabilities,&[json!(self.options.get("roots").is_some()),json!(false),json!(has_elicitation),json!(self.era.as_deref().unwrap_or("legacy")),json!(self.options.get("tasksExtension").and_then(Value::as_bool).unwrap_or(true))]).unwrap_or_else(|_|json!({}));if let(Some(target),Some(source))=(out.as_object_mut(),derived.as_object()){for(key,value)in source{target.entry(key.clone()).or_insert_with(||value.clone());}target.remove("sampling");if !has_elicitation{target.remove("elicitation");}}
+        // Advertised capabilities stay truthful: sampling and elicitation appear
+        // only while this client holds a handler that can answer them.
+        let has_elicitation=self.elicitation_handler.is_some();let has_sampling=self.sampling_handler.is_some();let derived=core_mcp(&crate::mcp_client_capabilities,&[json!(self.options.get("roots").is_some()),json!(has_sampling),json!(has_elicitation),json!(self.era.as_deref().unwrap_or("legacy")),json!(self.options.get("tasksExtension").and_then(Value::as_bool).unwrap_or(true))]).unwrap_or_else(|_|json!({}));if let(Some(target),Some(source))=(out.as_object_mut(),derived.as_object()){for(key,value)in source{target.entry(key.clone()).or_insert_with(||value.clone());}if !has_sampling{target.remove("sampling");}if !has_elicitation{target.remove("elicitation");}}
         out
     }
 
-    fn handle_server_request(&self,request:Value)->Value{ax_mcp_handle_server_request(&self.options,self.elicitation_handler.as_ref(),&self.server_info,request)}
+    fn handle_server_request(&self,request:Value)->Value{ax_mcp_handle_server_request(&self.options,self.elicitation_handler.as_ref(),self.sampling_handler.as_ref(),&self.server_info,request)}
 
     fn capability(&self, name: &str) -> bool {
         self.server_capabilities.get(name).is_some_and(|value| !value.is_null() && value != &Value::Bool(false))
@@ -773,11 +798,18 @@ fn mcp_transport_request(transport: &Arc<Mutex<Box<dyn AxMCPTransport>>>, next_i
     Ok(response.get("result").cloned().unwrap_or_else(|| json!({})))
 }
 
-fn ax_mcp_handle_server_request(options:&Value,elicitation:Option<&AxMCPElicitationHandler>,server_info:&Arc<Mutex<Value>>,request:Value)->Value{
-    let plan=match core_mcp(&crate::mcp_server_request_plan,&[request,options.get("roots").cloned().unwrap_or(Value::Null),json!(elicitation.is_some())]){Ok(value)=>value,Err(error)=>return json!({"jsonrpc":"2.0","id":Value::Null,"error":{"code":-32603,"message":error.to_string()}})};
-    if plan.get("action").and_then(Value::as_str)==Some("respond"){return plan.get("response").cloned().unwrap_or_else(||json!({}))}
+// Core decides what an inbound server request becomes; this only runs the
+// handler the plan names. The full plan is used so an installed sampling
+// handler can be offered, while the three-argument
+// `mcp_server_request_plan` keeps answering -32601 for sampling.
+fn ax_mcp_handle_server_request(options:&Value,elicitation:Option<&AxMCPElicitationHandler>,sampling:Option<&AxMCPSamplingHandler>,server_info:&Arc<Mutex<Value>>,request:Value)->Value{
+    let plan=match core_mcp(&crate::mcp_server_request_plan_full,&[request,options.get("roots").cloned().unwrap_or(Value::Null),json!(elicitation.is_some()),json!(sampling.is_some())]){Ok(value)=>value,Err(error)=>return json!({"jsonrpc":"2.0","id":Value::Null,"error":{"code":-32603,"message":error.to_string()}})};
+    let action=plan.get("action").and_then(Value::as_str).unwrap_or_default().to_string();
+    if action=="respond"{return plan.get("response").cloned().unwrap_or_else(||json!({}))}
     let id=plan.get("id").cloned().unwrap_or(Value::Null);let namespace=options.get("namespace").and_then(Value::as_str).map(str::to_string).or_else(||server_info.lock().ok().and_then(|info|info.get("name").and_then(Value::as_str).map(str::to_string))).unwrap_or_else(||"mcp".into());
-    match elicitation{Some(handler)=>match handler(plan.get("params").cloned().unwrap_or_else(||json!({})),json!({"client":"AxMCPClient","namespace":namespace})){Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":error.to_string()}})},None=>json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":"MCP elicitation handler unavailable"}})}
+    let handler=match action.as_str(){"sampling"=>sampling.cloned(),"elicitation"=>elicitation.cloned(),_=>None};
+    let Some(handler)=handler else{return json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":format!("MCP {action} handler unavailable")}})};
+    match handler(plan.get("params").cloned().unwrap_or_else(||json!({})),json!({"client":"AxMCPClient","namespace":namespace})){Ok(result)=>json!({"jsonrpc":"2.0","id":id,"result":result}),Err(error)=>json!({"jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":error.to_string()}})}
 }
 
 pub struct AxMCPStreamableHTTPTransport {
@@ -1029,6 +1061,24 @@ impl AxMCPScriptedTransport {
     pub fn new(responses: Vec<Value>) -> Self {
         Self { responses, requests: Vec::new(), notifications: Vec::new(), sent_responses: Vec::new(), request_headers:Vec::new(), request_streams:Vec::new(), protocol_version: None,era:None,message_handler:None,request_handler:None }
     }
+
+    /// Queue one more scripted response, for a host that reads a resource or
+    /// calls a tool after the client is already initialized.
+    pub fn push_response(&mut self, response: Value) { self.responses.push(response); }
+
+    /// Deliver an inbound server request the way a live transport would: the
+    /// client's request handler answers it and the answer is sent back, so the
+    /// response is recorded in `sent_responses`.
+    pub fn emit_server_request(&mut self, request: Value) -> AxResult<()> {
+        let handler = self.request_handler.clone().ok_or_else(|| AxError::new("mcp", "scripted transport has no request handler"))?;
+        let response = handler(request);
+        self.send_response(response)
+    }
+
+    /// Deliver an inbound notification to the client's message handler.
+    pub fn emit_notification(&mut self, message: Value) {
+        if let Some(handler) = self.message_handler.clone() { handler(message); }
+    }
 }
 
 impl AxMCPTransport for AxMCPScriptedTransport {
@@ -1054,9 +1104,270 @@ impl AxMCPTransport for AxMCPScriptedTransport {
     fn set_request_handler(&mut self,handler:AxMCPRequestHandler){self.request_handler=Some(handler)}
     fn open_request_stream(&mut self,message:Value)->AxResult<()>{if self.era.as_deref()!=Some("modern"){return Err(AxError::new("mcp","Request streams are only available for modern MCP"))}self.request_streams.push(message.clone());if let Some(handler)=&self.message_handler{handler(json!({"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"notifications":message.get("params").and_then(|params|params.get("notifications")).cloned().unwrap_or_else(||json!({})),"_meta":{"io.modelcontextprotocol/subscriptionId":message.get("id").cloned().unwrap_or(Value::Null)}}}))}Ok(())}
     fn sent_notifications(&self) -> Vec<Value> { self.notifications.clone() }
+    fn sent_responses(&self) -> Vec<Value> { self.sent_responses.clone() }
+    fn script_response(&mut self, response: Value) -> AxResult<()> { self.push_response(response); Ok(()) }
+    fn inject_server_request(&mut self, request: Value) -> AxResult<()> { self.emit_server_request(request) }
     fn sent_requests(&self)->Vec<Value>{self.requests.clone()}
     fn sent_request_headers(&self)->Vec<Map<String,Value>>{self.request_headers.clone()}
     fn sent_request_streams(&self)->Vec<Value>{self.request_streams.clone()}
+}
+
+// ---------------------------------------------------------------------------
+// MCP Apps host bridge
+// ---------------------------------------------------------------------------
+//
+// Core owns the App policy: which tools a frame may call, what a resource's
+// sandbox, CSP and permission policy are, and what an inbound frame message
+// means. This bridge is the host half: it reads the resource over the client,
+// decodes a blob body, runs the host's own callbacks, and frames every answer
+// as JSON-RPC. No policy decision is taken here.
+
+/// Host callbacks and host-declared context for an MCP App frame. A callback
+/// that is absent is a capability the host does not have: Core refuses the
+/// matching frame request instead of the host silently dropping it.
+#[derive(Clone, Default)]
+pub struct AxMCPAppBridgeOptions {
+    pub host_capabilities: Option<Value>,
+    pub host_context: Option<Value>,
+    /// Sends a host-originated message to the frame. A host that cannot
+    /// deliver reports it, so a failed teardown or notification is visible
+    /// instead of being dropped.
+    pub send_to_view: Option<Arc<dyn Fn(Value) -> AxResult<()> + Send + Sync>>,
+    pub open_link: Option<Arc<dyn Fn(String) -> AxResult<()> + Send + Sync>>,
+    pub send_message: Option<Arc<dyn Fn(Value) -> AxResult<()> + Send + Sync>>,
+    pub update_model_context: Option<Arc<dyn Fn(Value) -> AxResult<()> + Send + Sync>>,
+    pub size_changed: Option<Arc<dyn Fn(Value) -> AxResult<()> + Send + Sync>>,
+    pub log: Option<Arc<dyn Fn(Value) -> AxResult<()> + Send + Sync>>,
+    /// Answers a frame's display-mode request; the host grants the mode, so a
+    /// frame asking for fullscreen can still be given inline. The granted
+    /// value must be one of AX_MCP_APP_DISPLAY_MODES.
+    pub request_display_mode: Option<Arc<dyn Fn(String) -> AxResult<String> + Send + Sync>>,
+    /// Final say over an App request. Returning false denies it before any
+    /// effect runs.
+    pub authorize: Option<Arc<dyn Fn(Value) -> AxResult<bool> + Send + Sync>>,
+}
+
+/// The display modes the App protocol defines. A host that grants anything
+/// else is a host bug, so the request fails instead of handing the frame a
+/// mode it cannot honour.
+pub const AX_MCP_APP_DISPLAY_MODES: [&str; 3] = ["inline", "fullscreen", "pip"];
+
+pub struct AxMCPAppBridge {
+    client: Arc<Mutex<AxMCPClient>>,
+    tool: Value,
+    options: AxMCPAppBridgeOptions,
+    initialized: bool,
+    next_id: u64,
+}
+
+impl AxMCPAppBridge {
+    /// Bridge the App resource of one of the client's tools.
+    pub fn new(client: Arc<Mutex<AxMCPClient>>, tool: &str, options: AxMCPAppBridgeOptions) -> AxResult<Self> {
+        let found = {
+            let guard = client.lock().unwrap();
+            guard.tools.iter().find(|item| item.get("name").and_then(Value::as_str) == Some(tool)).cloned()
+        };
+        let tool = found.ok_or_else(|| AxError::new("mcp", format!("MCP App tool not found: {tool}")))?;
+        Ok(Self { client, tool, options, initialized: false, next_id: 1 })
+    }
+
+    /// Bridge a tool descriptor the host already holds.
+    pub fn from_tool(client: Arc<Mutex<AxMCPClient>>, tool: Value, options: AxMCPAppBridgeOptions) -> Self {
+        Self { client, tool, options, initialized: false, next_id: 1 }
+    }
+
+    pub fn tool_name(&self) -> String {
+        self.tool.get("name").and_then(Value::as_str).unwrap_or_default().to_string()
+    }
+
+    pub fn is_initialized(&self) -> bool { self.initialized }
+
+    /// The tool's App metadata, as Core reads it.
+    pub fn tool_meta(&self) -> AxResult<Value> {
+        core_mcp(&crate::mcp_app_tool_meta, &[self.tool.clone()])
+    }
+
+    /// Read the tool's ui:// resource and validate it for a frame. The body
+    /// may arrive as text or as a base64 blob; everything after that (MIME
+    /// type, HTML document shape, CSP sources, permissions) is Core's call.
+    pub fn load_resource(&self) -> AxResult<Value> {
+        let uri = self.tool_meta()?.get("resourceUri").and_then(Value::as_str).unwrap_or_default().to_string();
+        if !uri.starts_with("ui://") {
+            return Err(AxError::new("mcp", format!("MCP App tool {} has no valid ui:// resource", self.tool_name())));
+        }
+        let response = { let mut client = self.client.lock().unwrap(); client.read_resource(&uri)? };
+        let item = response
+            .get("contents")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().find(|item| item.get("uri").and_then(Value::as_str) == Some(uri.as_str())).cloned())
+            .ok_or_else(|| AxError::new("mcp", format!("MCP App resource {uri} was not returned")))?;
+        let html = match item.get("text").and_then(Value::as_str) {
+            Some(text) => text.to_string(),
+            None => {
+                // A body that is neither text nor a decodable base64 blob is
+                // refused here: handing a frame replacement characters would
+                // turn a broken resource into a rendered one.
+                let blob = item
+                    .get("blob")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AxError::new("mcp", format!("MCP App resource {uri} carried neither text nor blob")))?;
+                let valid = blob
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=') || byte.is_ascii_whitespace());
+                if !valid {
+                    return Err(AxError::new("mcp", "MCP App resource blob is not valid base64 HTML"));
+                }
+                String::from_utf8(crate::decode_base64(blob))
+                    .map_err(|_| AxError::new("mcp", "MCP App resource blob is not valid base64 HTML"))?
+            }
+        };
+        let meta = item.get("_meta").and_then(|meta| meta.get("ui")).filter(|value| value.is_object()).cloned().unwrap_or_else(|| json!({}));
+        let plan = core_mcp(&crate::mcp_app_resource_plan, &[
+            json!(self.tool_name()),
+            json!(uri),
+            item.get("mimeType").cloned().unwrap_or_else(|| json!("<missing>")),
+            json!(html),
+            meta,
+        ])?;
+        if plan.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(AxError::new("mcp", plan.get("message").and_then(Value::as_str).unwrap_or("MCP App resource was refused")));
+        }
+        Ok(plan.get("resource").cloned().unwrap_or_else(|| json!({})))
+    }
+
+    /// Handle one message from the frame. A request is always answered, with
+    /// an error object when it is refused; a notification that is a protocol
+    /// error is raised to the host, because there is nothing to answer.
+    pub fn handle_view_message(&mut self, message: Value) -> AxResult<Option<Value>> {
+        match self.dispatch_view_message(&message) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                let Some(id) = message.get("id").cloned() else { return Err(error) };
+                Ok(Some(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.to_string()}})))
+            }
+        }
+    }
+
+    fn dispatch_view_message(&mut self, message: &Value) -> AxResult<Option<Value>> {
+        let (namespace, tools) = {
+            let guard = self.client.lock().unwrap();
+            (guard.namespace(), Value::Array(guard.tools.clone()))
+        };
+        let context = json!({
+            "namespace": namespace,
+            "tool": self.tool_name(),
+            "tools": tools,
+            "hostCapabilities": self.options.host_capabilities.clone().unwrap_or(Value::Null),
+            "hostContext": self.options.host_context.clone().unwrap_or(Value::Null),
+            "canOpenLink": self.options.open_link.is_some(),
+            "canSendMessage": self.options.send_message.is_some(),
+            "canUpdateModelContext": self.options.update_model_context.is_some(),
+        });
+        let plan = core_mcp(&crate::mcp_app_view_message_plan, &[message.clone(), json!(self.initialized), context])?;
+        let action = plan.get("action").and_then(Value::as_str).unwrap_or_default().to_string();
+        match action.as_str() {
+            "error" => return Err(AxError::new("mcp", plan.get("reason").and_then(Value::as_str).unwrap_or("MCP App request refused"))),
+            "initialized" => { self.initialized = true; return Ok(None) }
+            "ignore" => return Ok(None),
+            "log" => {
+                if let Some(callback) = self.options.log.clone() { callback(plan.get("params").cloned().unwrap_or(Value::Null))?; }
+                return Ok(None);
+            }
+            "size-changed" => {
+                if let Some(callback) = self.options.size_changed.clone() { callback(plan.get("size").cloned().unwrap_or_else(|| json!({})))?; }
+                return Ok(None);
+            }
+            _ => {}
+        }
+        let result = if action == "respond" {
+            plan.get("result").cloned().unwrap_or_else(|| json!({}))
+        } else {
+            if let Some(authorize) = self.options.authorize.clone() {
+                let request = json!({
+                    "action": action,
+                    "method": message.get("method").cloned().unwrap_or_else(|| json!(action)),
+                    "params": message.get("params").cloned().unwrap_or(Value::Null),
+                    "namespace": namespace,
+                    "tool": self.tool_name(),
+                });
+                if !authorize(request)? {
+                    return Err(AxError::new("mcp", format!("MCP App request denied: {action}")));
+                }
+            }
+            match action.as_str() {
+                "call-tool" => {
+                    let name = plan.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let arguments = plan.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                    let mut client = self.client.lock().unwrap();
+                    client.call_tool(&name, arguments)?
+                }
+                "read-resource" => {
+                    let uri = plan.get("uri").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let mut client = self.client.lock().unwrap();
+                    client.read_resource(&uri)?
+                }
+                "open-link" => {
+                    let url = plan.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let callback = self.options.open_link.clone().ok_or_else(|| AxError::new("mcp", "Link opening is disabled"))?;
+                    callback(url)?;
+                    json!({})
+                }
+                "send-message" => {
+                    let callback = self.options.send_message.clone().ok_or_else(|| AxError::new("mcp", "App messages are disabled"))?;
+                    callback(plan.get("params").cloned().unwrap_or_else(|| json!({})))?;
+                    json!({})
+                }
+                "update-model-context" => {
+                    let callback = self.options.update_model_context.clone().ok_or_else(|| AxError::new("mcp", "App model-context updates are disabled"))?;
+                    callback(plan.get("update").cloned().unwrap_or_else(|| json!({})))?;
+                    json!({})
+                }
+                "request-display-mode" => {
+                    let mode = plan.get("mode").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let granted = match self.options.request_display_mode.clone() { Some(callback) => callback(mode)?, None => "inline".to_string() };
+                    // The host grants the mode, but only one the protocol
+                    // defines; anything else fails rather than reaching the
+                    // frame as a successful answer.
+                    if !AX_MCP_APP_DISPLAY_MODES.contains(&granted.as_str()) {
+                        return Err(AxError::new("mcp", format!("host granted an invalid MCP App display mode {granted}")));
+                    }
+                    json!({"mode": granted})
+                }
+                other => return Err(AxError::new("mcp", format!("Unknown MCP App action: {other}"))),
+            }
+        };
+        let id = message.get("id").cloned().unwrap_or(Value::Null);
+        Ok(Some(json!({"jsonrpc":"2.0","id":id,"result":result})))
+    }
+
+    fn notify(&self, method: &str, params: Value) -> AxResult<()> {
+        if !self.initialized { return Err(AxError::new("mcp", "MCP App is not initialized")); }
+        if let Some(callback) = self.options.send_to_view.clone() {
+            callback(json!({"jsonrpc":"2.0","method":method,"params":params}))?;
+        }
+        Ok(())
+    }
+
+    pub fn notify_tool_input(&self, arguments: Value) -> AxResult<()> { self.notify("ui/notifications/tool-input", json!({"arguments": arguments})) }
+    pub fn notify_tool_input_partial(&self, arguments: Value) -> AxResult<()> { self.notify("ui/notifications/tool-input-partial", json!({"arguments": arguments})) }
+    pub fn notify_tool_result(&self, result: Value) -> AxResult<()> { self.notify("ui/notifications/tool-result", result) }
+    pub fn notify_tool_cancelled(&self, reason: &str) -> AxResult<()> { self.notify("ui/notifications/tool-cancelled", json!({"reason": reason})) }
+    pub fn notify_host_context_changed(&self, context: Value) -> AxResult<()> { self.notify("ui/notifications/host-context-changed", context) }
+
+    /// Tell the frame its resource is going away and stop sending to it. The
+    /// teardown itself is a request, so it carries an id. The id is spent
+    /// whether or not the send succeeds, and the bridge stays initialized
+    /// when the host could not deliver the teardown, so the host can retry
+    /// instead of silently keeping a frame that was never told.
+    pub fn teardown(&mut self, reason: &str) -> AxResult<()> {
+        let id = self.next_id;
+        self.next_id += 1;
+        if let Some(callback) = self.options.send_to_view.clone() {
+            callback(json!({"jsonrpc":"2.0","id":id,"method":"ui/resource-teardown","params":{"reason":reason}}))?;
+        }
+        self.initialized = false;
+        Ok(())
+    }
 }
 
 pub fn ax_mcp_stdio_encode(message: &Value) -> AxResult<String> { Ok(format!("{}\n", js_json_string(message))) }
@@ -1461,6 +1772,7 @@ fn run_mcp_conformance_fixture_inner(fixture: &Value, operation: &str) -> AxResu
         _ => {
             let responses = fixture.get("responses").or_else(|| fixture.get("transport_responses")).and_then(Value::as_array).cloned().unwrap_or_default();
             let mut client = AxMCPClient::new(Box::new(AxMCPScriptedTransport::new(responses)), fixture.get("client_options").cloned().unwrap_or(Value::Null));
+            let sampling_calls=Arc::new(Mutex::new(Vec::<(Value,Value)>::new()));if operation=="server_requests_sampling"{let captured=sampling_calls.clone();let response=fixture.get("sampling_result").cloned().unwrap_or_else(||json!({}));client.set_sampling_handler(move|params,context|{captured.lock().unwrap().push((params,context));Ok(response.clone())});}
             let elicitation_calls=Arc::new(Mutex::new(Vec::<(Value,Value)>::new()));if matches!(operation,"mrtr_elicitation"|"tasks_v2_input_required"|"server_requests_legacy"){let captured=elicitation_calls.clone();let response=fixture.get("elicitation_result").cloned().unwrap_or_else(||json!({}));client.set_elicitation_handler(move|params,context|{if params.get("fail").and_then(Value::as_bool)==Some(true){return Err(AxError::new("mcp","fixture handler failed"))}captured.lock().unwrap().push((params,context));Ok(response.clone())});}
             client.init()?;
             if let Some(expected) = fixture.get("expected_protocol_version").and_then(Value::as_str) {
@@ -1477,7 +1789,7 @@ fn run_mcp_conformance_fixture_inner(fixture: &Value, operation: &str) -> AxResu
                 "tasks_v2_modern"=>{let result=client.call_tool("slow",json!({}))?;expect_subset("task call result",&result,fixture.get("expected_call_result").unwrap_or(&Value::Null))?;client.provide_task_input("task-1",json!({}))?;client.cancel_task("task-1")?;match client.list_tasks(None){Err(error)if error.to_string().contains(fixture.get("expected_list_error").and_then(Value::as_str).unwrap_or_default())=>{},_=>return Err(AxError::new("fixture","missing modern tasks/list rejection"))}match client.get_task_result("task-1"){Err(error)if error.to_string().contains(fixture.get("expected_result_error").and_then(Value::as_str).unwrap_or_default())=>{},_=>return Err(AxError::new("fixture","missing modern tasks/result rejection"))}let methods=Value::Array(client.transport.lock().unwrap().sent_requests().into_iter().map(|request|request.get("method").cloned().unwrap_or(Value::Null)).collect());if &methods!=fixture.get("expected_methods").unwrap_or(&Value::Null){return Err(AxError::new("fixture","task request methods mismatch"))}Ok(())}
                 "tasks_v2_input_required"=>{let result=client.call_tool("slow",json!({}))?;expect_subset("task input-required result",&result,fixture.get("expected_result").unwrap_or(&Value::Null))?;let calls=elicitation_calls.lock().unwrap();if calls.len()!=1{return Err(AxError::new("fixture","task elicitation handler count mismatch"))}expect_subset("task elicitation params",&calls[0].0,fixture.get("expected_elicitation_params").unwrap_or(&Value::Null))?;expect_subset("task elicitation context",&calls[0].1,fixture.get("expected_context").unwrap_or(&Value::Null))?;drop(calls);let requests=client.transport.lock().unwrap().sent_requests();let update=requests.iter().find(|request|request.get("method").and_then(Value::as_str)==Some("tasks/update")).ok_or_else(||AxError::new("fixture","missing tasks/update"))?;expect_subset("task update params",update.get("params").unwrap_or(&Value::Null),fixture.get("expected_update_params").unwrap_or(&Value::Null))?;let methods=Value::Array(requests.iter().map(|request|request.get("method").cloned().unwrap_or(Value::Null)).collect());if &methods!=fixture.get("expected_methods").unwrap_or(&Value::Null){return Err(AxError::new("fixture","task input-required methods mismatch"))}Ok(())}
                 "server_requests_legacy"=>{let mut responses=Vec::new();for request in fixture.get("server_requests").and_then(Value::as_array).cloned().unwrap_or_default(){responses.push(client.handle_server_request(request))}for(index,expected)in fixture.get("expected_responses").and_then(Value::as_array).cloned().unwrap_or_default().iter().enumerate(){expect_subset("server response",&responses[index],expected)?}let calls=elicitation_calls.lock().unwrap();if calls.len()!=1{return Err(AxError::new("fixture","legacy elicitation handler count mismatch"))}expect_subset("legacy elicitation params",&calls[0].0,fixture.get("expected_elicitation_params").unwrap_or(&Value::Null))?;expect_subset("legacy elicitation context",&calls[0].1,fixture.get("expected_context").unwrap_or(&Value::Null))?;drop(calls);let requests=client.transport.lock().unwrap().sent_requests();let initialize=requests.iter().find(|request|request.get("method").and_then(Value::as_str)==Some("initialize")).ok_or_else(||AxError::new("fixture","missing initialize"))?;expect_subset("legacy client capabilities",initialize.get("params").and_then(|params|params.get("capabilities")).unwrap_or(&Value::Null),fixture.get("expected_legacy_capabilities").unwrap_or(&Value::Null))?;Ok(())}
-                "mrtr_elicitation"=>{let result=client.call_tool("work",json!({"value":1}))?;expect_subset("MRTR elicitation result",&result,fixture.get("expected_result").unwrap_or(&Value::Null))?;let calls=elicitation_calls.lock().unwrap();if calls.len()!=1{return Err(AxError::new("fixture","MRTR elicitation handler count mismatch"))}expect_subset("MRTR elicitation params",&calls[0].0,fixture.get("expected_elicitation_params").unwrap_or(&Value::Null))?;expect_subset("MRTR elicitation context",&calls[0].1,fixture.get("expected_context").unwrap_or(&Value::Null))?;drop(calls);let requests=client.transport.lock().unwrap().sent_requests();let tool_calls=requests.iter().filter(|request|request.get("method").and_then(Value::as_str)==Some("tools/call")).collect::<Vec<_>>();for(index,expected)in fixture.get("expected_call_params").and_then(Value::as_array).cloned().unwrap_or_default().iter().enumerate(){expect_subset("MRTR elicitation call params",tool_calls[index].get("params").unwrap_or(&Value::Null),expected)?}let capabilities=requests.first().and_then(|request|request.get("params")).and_then(|params|params.get("_meta")).and_then(|meta|meta.get("io.modelcontextprotocol/clientCapabilities")).cloned().unwrap_or_else(||json!({}));if capabilities.get("elicitation").is_none()||capabilities.get("sampling").is_some(){return Err(AxError::new("fixture","dishonest MRTR capabilities"))}let mut bad=AxMCPClient::new(Box::new(AxMCPScriptedTransport::new(vec![])),json!({"era":"modern","sampling":true}));match bad.init(){Err(error)if error.to_string().contains("sampling is not supported")=>Ok(()),_=>Err(AxError::new("fixture","truthy sampling option was accepted"))}}
+                "mrtr_elicitation"=>{let result=client.call_tool("work",json!({"value":1}))?;expect_subset("MRTR elicitation result",&result,fixture.get("expected_result").unwrap_or(&Value::Null))?;let calls=elicitation_calls.lock().unwrap();if calls.len()!=1{return Err(AxError::new("fixture","MRTR elicitation handler count mismatch"))}expect_subset("MRTR elicitation params",&calls[0].0,fixture.get("expected_elicitation_params").unwrap_or(&Value::Null))?;expect_subset("MRTR elicitation context",&calls[0].1,fixture.get("expected_context").unwrap_or(&Value::Null))?;drop(calls);let requests=client.transport.lock().unwrap().sent_requests();let tool_calls=requests.iter().filter(|request|request.get("method").and_then(Value::as_str)==Some("tools/call")).collect::<Vec<_>>();for(index,expected)in fixture.get("expected_call_params").and_then(Value::as_array).cloned().unwrap_or_default().iter().enumerate(){expect_subset("MRTR elicitation call params",tool_calls[index].get("params").unwrap_or(&Value::Null),expected)?}let capabilities=requests.first().and_then(|request|request.get("params")).and_then(|params|params.get("_meta")).and_then(|meta|meta.get("io.modelcontextprotocol/clientCapabilities")).cloned().unwrap_or_else(||json!({}));if capabilities.get("elicitation").is_none()||capabilities.get("sampling").is_some(){return Err(AxError::new("fixture","dishonest MRTR capabilities"))}let mut bad=AxMCPClient::new(Box::new(AxMCPScriptedTransport::new(vec![])),json!({"era":"modern","sampling":true}));match bad.init(){Err(error)if error.to_string().contains("sampling requires a callable handler")=>Ok(()),_=>Err(AxError::new("fixture","truthy sampling option was accepted"))}}
                 "mrtr_roots"=>{let result=client.call_tool("work",json!({"value":1}))?;expect_subset("MRTR tool result",&result,fixture.get("expected_call_result").unwrap_or(&Value::Null))?;let prompt=client.get_prompt("ask",json!({}))?;expect_subset("MRTR prompt result",&prompt,fixture.get("expected_prompt_result").unwrap_or(&Value::Null))?;let resource=client.read_resource("file:///resource")?;expect_subset("MRTR resource result",&resource,fixture.get("expected_resource_result").unwrap_or(&Value::Null))?;let requests=client.transport.lock().unwrap().sent_requests();let methods=Value::Array(requests.iter().map(|request|request.get("method").cloned().unwrap_or(Value::Null)).collect());if &methods!=fixture.get("expected_methods").unwrap_or(&Value::Null){return Err(AxError::new("fixture","MRTR request methods mismatch"))}let tool_calls=requests.iter().filter(|request|request.get("method").and_then(Value::as_str)==Some("tools/call")).collect::<Vec<_>>();let mut ids=tool_calls.iter().map(|request|request.get("id").and_then(Value::as_str).unwrap_or_default().to_string()).collect::<Vec<_>>();let id_count=ids.len();ids.sort();ids.dedup();if ids.len()!=id_count{return Err(AxError::new("fixture","MRTR rounds reused a request id"))}for(index,expected)in fixture.get("expected_tool_call_params").and_then(Value::as_array).cloned().unwrap_or_default().iter().enumerate(){let params=tool_calls[index].get("params").unwrap_or(&Value::Null);expect_subset("MRTR tool params",params,expected)?;if expected.get("inputResponses").is_none(){if params.get("inputResponses").is_some()||params.get("requestState").is_some(){return Err(AxError::new("fixture","initial MRTR request included round state"))}}else{let actual=params.get("inputResponses").and_then(Value::as_object).cloned().unwrap_or_default();let wanted=expected.get("inputResponses").and_then(Value::as_object).cloned().unwrap_or_default();if actual.len()!=wanted.len()||wanted.keys().any(|key|!actual.contains_key(key)){return Err(AxError::new("fixture","MRTR request retained stale input responses"))}}if expected.get("requestState").is_none()&&params.get("requestState").is_some(){return Err(AxError::new("fixture","MRTR request retained stale requestState"))}}Ok(())}
                 "subscriptions_listen"=>{for item in fixture.get("semantic_cases").and_then(Value::as_array).cloned().unwrap_or_default(){let actual=core_mcp(&crate::mcp_listen_interests,&[item.get("subscribed_uris").cloned().unwrap_or_else(||json!([])),item.get("filters").cloned().unwrap_or_else(||json!({})),item.get("task_ids").cloned().unwrap_or(Value::Null)])?;if actual!=item.get("expected").cloned().unwrap_or_else(||json!({})){return Err(AxError::new("fixture","listen interests mismatch"))}}let delivered=Arc::new(Mutex::new(Vec::<Value>::new()));let captured=delivered.clone();client.add_notification_listener(move|message|captured.lock().unwrap().push(message));client.start_listening()?;let streams=client.transport.lock().unwrap().sent_request_streams();if streams.len()!=1{return Err(AxError::new("fixture","initial subscriptions/listen stream missing"))}let first=streams[0].clone();expect_subset("initial listen interests",first.get("params").and_then(|params|params.get("notifications")).unwrap_or(&Value::Null),fixture.get("expected_first_notifications").unwrap_or(&Value::Null))?;client.acquire_resource_subscription(fixture.get("uri").and_then(Value::as_str).unwrap_or_default(),"fixture")?;let streams=client.transport.lock().unwrap().sent_request_streams();if streams.len()!=fixture.get("expected_stream_count").and_then(Value::as_u64).unwrap_or_default()as usize{return Err(AxError::new("fixture","subscription interest change did not restart request stream"))}let second=streams.last().cloned().unwrap_or(Value::Null);if first.get("id")==second.get("id"){return Err(AxError::new("fixture","subscriptions/listen restart reused its request id"))}expect_subset("updated listen interests",second.get("params").and_then(|params|params.get("notifications")).unwrap_or(&Value::Null),fixture.get("expected_second_notifications").unwrap_or(&Value::Null))?;let count_updates=||delivered.lock().unwrap().iter().filter(|item|item.get("method").and_then(Value::as_str)==Some("notifications/resources/updated")).count();let before=count_updates();let mut notification=fixture.get("delivered_notification").cloned().unwrap_or_else(||json!({}));notification["params"]["_meta"]=json!({"io.modelcontextprotocol/subscriptionId":"other"});client.inbound_messages.lock().unwrap().push(notification.clone());client.drain_inbound();if count_updates()!=before{return Err(AxError::new("fixture","cross-subscription notification was delivered"))}notification["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"]=second.get("id").cloned().unwrap_or(Value::Null);client.inbound_messages.lock().unwrap().push(notification);client.drain_inbound();if count_updates()!=before+1{return Err(AxError::new("fixture","active subscription notification was not delivered"))}if delivered.lock().unwrap().last().and_then(|item|item.get("params")).and_then(|params|params.get("_meta")).is_some(){return Err(AxError::new("fixture","subscription id leaked to notification consumer"))}let requests=client.transport.lock().unwrap().sent_requests();for forbidden in fixture.get("expected_forbidden_methods").and_then(Value::as_array).cloned().unwrap_or_default(){if requests.iter().any(|request|request.get("method")==Some(&forbidden)){return Err(AxError::new("fixture","modern subscription emitted legacy method"))}}Ok(())}
                 "task_listen_restart"=>{let delivered=Arc::new(Mutex::new(Vec::<Value>::new()));let captured=delivered.clone();client.add_notification_listener(move|message|captured.lock().unwrap().push(message));client.start_listening()?;let streams=client.transport.lock().unwrap().sent_request_streams();if streams.len()!=1{return Err(AxError::new("fixture","initial subscriptions/listen stream missing"))}if streams[0].get("params").and_then(|params|params.get("notifications")).and_then(|value|value.get("taskIds")).is_some(){return Err(AxError::new("fixture","listener asked for tasks before any were recorded"))}let outcome=client.call_tool_outcome(fixture.get("tool").and_then(Value::as_str).unwrap_or_default(),fixture.get("arguments").cloned().unwrap_or_else(||json!({})))?;if !matches!(outcome,AxMCPToolCallOutcome::Task(_)){return Err(AxError::new("fixture","expected a task outcome"))}let streams=client.transport.lock().unwrap().sent_request_streams();if streams.len()!=2{return Err(AxError::new("fixture","a recorded task did not restart the listener"))}let second=streams.last().cloned().unwrap_or(Value::Null);expect_subset("task listen interests",second.get("params").and_then(|params|params.get("notifications")).unwrap_or(&Value::Null),fixture.get("expected_second_notifications").unwrap_or(&Value::Null))?;let mut notification=fixture.get("task_notification").cloned().unwrap_or_else(||json!({}));notification["params"]["_meta"]=json!({"io.modelcontextprotocol/subscriptionId":second.get("id").cloned().unwrap_or(Value::Null)});client.inbound_messages.lock().unwrap().push(notification);client.drain_inbound();if delivered.lock().unwrap().iter().filter(|item|item.get("method").and_then(Value::as_str)==Some("notifications/tasks")).count()!=1{return Err(AxError::new("fixture","task notification was not delivered"))}if client.transport.lock().unwrap().sent_request_streams().len()!=2{return Err(AxError::new("fixture","a known task restarted the listener"))}Ok(())}
@@ -1521,6 +1833,202 @@ fn run_mcp_conformance_fixture_inner(fixture: &Value, operation: &str) -> AxResu
                     expect_subset("cancel notification", last, fixture.get("expected_notification").unwrap_or(&Value::Null))
                 }
                 "roots_notifications" => {let response=client.handle_server_request(json!({"jsonrpc":"2.0","id":"server-1","method":"roots/list"}));expect_subset("roots response",&response,fixture.get("expected_roots_response").unwrap_or(&Value::Null))}
+                "server_requests_sampling"=>{
+                    // Every inbound request goes in over the transport, so the
+                    // request handler installed by init() is the code under test.
+                    for request in fixture.get("server_requests").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        client.transport.lock().unwrap().inject_server_request(request)?;
+                    }
+                    let responses=Value::Array(client.transport.lock().unwrap().sent_responses());
+                    let expected=fixture.get("expected_responses").cloned().unwrap_or(Value::Null);
+                    if responses!=expected{return Err(AxError::new("fixture",format!("sampling responses mismatch: expected {expected}, got {responses}")))}
+                    let calls=sampling_calls.lock().unwrap();
+                    let wanted=fixture.get("expected_handler_calls").and_then(Value::as_u64).unwrap_or_default() as usize;
+                    if calls.len()!=wanted{return Err(AxError::new("fixture",format!("sampling handler ran {} time(s), expected {wanted}",calls.len())))}
+                    let first=calls.first().ok_or_else(||AxError::new("fixture","sampling handler never ran"))?;
+                    if &first.0!=fixture.get("expected_handler_params").unwrap_or(&Value::Null){return Err(AxError::new("fixture","sampling handler params mismatch"))}
+                    if first.1.get("client").and_then(Value::as_str)!=Some("AxMCPClient"){return Err(AxError::new("fixture","sampling context lost its client"))}
+                    expect_subset("sampling context",&first.1,fixture.get("expected_context").unwrap_or(&Value::Null))?;
+                    drop(calls);
+                    let requests=client.transport.lock().unwrap().sent_requests();
+                    let initialize=requests.iter().find(|request|request.get("method").and_then(Value::as_str)==Some("initialize")).ok_or_else(||AxError::new("fixture","missing initialize"))?;
+                    expect_subset("sampling capabilities",initialize.get("params").and_then(|params|params.get("capabilities")).unwrap_or(&Value::Null),fixture.get("expected_capabilities").unwrap_or(&Value::Null))?;
+                    // Without a handler the same request must be refused and the
+                    // capability must never be advertised.
+                    let without=fixture.get("without_handler").cloned().unwrap_or_else(||json!({}));
+                    let mut plain=AxMCPClient::new(Box::new(AxMCPScriptedTransport::new(fixture.get("responses").and_then(Value::as_array).cloned().unwrap_or_default())),fixture.get("client_options").cloned().unwrap_or(Value::Null));
+                    plain.init()?;
+                    plain.transport.lock().unwrap().inject_server_request(without.get("server_request").cloned().unwrap_or(Value::Null))?;
+                    let plain_responses=Value::Array(plain.transport.lock().unwrap().sent_responses());
+                    let plain_expected=Value::Array(vec![without.get("expected_response").cloned().unwrap_or(Value::Null)]);
+                    if plain_responses!=plain_expected{return Err(AxError::new("fixture",format!("unsupported sampling response mismatch: expected {plain_expected}, got {plain_responses}")))}
+                    let plain_requests=plain.transport.lock().unwrap().sent_requests();
+                    let plain_initialize=plain_requests.iter().find(|request|request.get("method").and_then(Value::as_str)==Some("initialize")).ok_or_else(||AxError::new("fixture","missing initialize without a sampling handler"))?;
+                    let plain_capabilities=plain_initialize.get("params").and_then(|params|params.get("capabilities")).cloned().unwrap_or_else(||json!({}));
+                    for forbidden in without.get("forbidden_capabilities").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let name=forbidden.as_str().unwrap_or_default();
+                        if plain_capabilities.get(name).is_some(){return Err(AxError::new("fixture",format!("advertised {name} without a handler")))}
+                    }
+                    // The three-argument helper other ports call must keep
+                    // answering -32601 for sampling.
+                    for case in fixture.get("legacy_plan_cases").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let actual=core_mcp(&crate::mcp_server_request_plan,&[case.get("request").cloned().unwrap_or(Value::Null),Value::Null,json!(false)])?;
+                        if &actual!=case.get("expected").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("three-argument server request plan changed: {actual}")))}
+                    }
+                    Ok(())
+                }
+                "app_bridge"=>{
+                    let tool=fixture.get("tool").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let transport=client.transport.clone();
+                    let tools=client.tools.clone();
+                    let client=Arc::new(Mutex::new(client));
+                    let sent=Arc::new(Mutex::new(Vec::<Value>::new()));
+                    let links=Arc::new(Mutex::new(Vec::<String>::new()));
+                    let updates=Arc::new(Mutex::new(Vec::<Value>::new()));
+                    let sizes=Arc::new(Mutex::new(Vec::<Value>::new()));
+                    let options={
+                        let (sent,links,updates,sizes)=(sent.clone(),links.clone(),updates.clone(),sizes.clone());
+                        AxMCPAppBridgeOptions{
+                            send_to_view:Some(Arc::new(move|message|{sent.lock().unwrap().push(message);Ok(())})),
+                            open_link:Some(Arc::new(move|url|{links.lock().unwrap().push(url);Ok(())})),
+                            update_model_context:Some(Arc::new(move|update|{updates.lock().unwrap().push(update);Ok(())})),
+                            size_changed:Some(Arc::new(move|size|{sizes.lock().unwrap().push(size);Ok(())})),
+                            request_display_mode:Some(Arc::new(|_mode|Ok("inline".to_string()))),
+                            ..Default::default()
+                        }
+                    };
+                    let mut bridge=AxMCPAppBridge::new(client.clone(),&tool,options)?;
+                    let find_tool=|name:&str|tools.iter().find(|item|item.get("name").and_then(Value::as_str)==Some(name)).cloned().ok_or_else(||AxError::new("fixture",format!("fixture tool {name} missing")));
+                    let meta=core_mcp(&crate::mcp_app_tool_meta,&[find_tool(&tool)?])?;
+                    if &meta!=fixture.get("expected_tool_meta").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("App tool meta mismatch: {meta}")))}
+                    for case in fixture.get("visibility_cases").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let name=case.get("tool").and_then(Value::as_str).unwrap_or_default();
+                        let principal=case.get("principal").cloned().unwrap_or_else(||json!("model"));
+                        let actual=core_mcp(&crate::mcp_app_tool_visible_to,&[find_tool(name)?,principal])?;
+                        if &actual!=case.get("expected").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("App visibility mismatch for {name}: {actual}")))}
+                    }
+                    transport.lock().unwrap().script_response(fixture.get("resource_read").cloned().unwrap_or(Value::Null))?;
+                    expect_subset("App resource",&bridge.load_resource()?,fixture.get("expected_resource").unwrap_or(&Value::Null))?;
+                    // Each resource case gets its own client, so a refused
+                    // resource cannot leave state behind in the shared one.
+                    let load_content=|content:Value|->AxResult<Value>{
+                        let mut responses=fixture.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
+                        responses.push(json!({"method":"resources/read","result":{"contents":[content]}}));
+                        let mut resource_client=AxMCPClient::new(Box::new(AxMCPScriptedTransport::new(responses)),fixture.get("client_options").cloned().unwrap_or(Value::Null));
+                        resource_client.init()?;
+                        let bridge=AxMCPAppBridge::new(Arc::new(Mutex::new(resource_client)),&tool,AxMCPAppBridgeOptions::default())?;
+                        bridge.load_resource()
+                    };
+                    for case in fixture.get("invalid_resources").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let note=case.get("note").and_then(Value::as_str).unwrap_or_default().to_string();
+                        let expected=case.get("expected_error_contains").and_then(Value::as_str).unwrap_or_default().to_string();
+                        match load_content(case.get("content").cloned().unwrap_or(Value::Null)){
+                            Ok(resource)=>return Err(AxError::new("fixture",format!("invalid App resource accepted ({note}): {resource}"))),
+                            Err(error)=>{if !error.to_string().contains(&expected){return Err(AxError::new("fixture",format!("invalid App resource error mismatch ({note}): {error}")))}}
+                        }
+                    }
+                    let blob=fixture.get("blob_resource").cloned().unwrap_or_else(||json!({}));
+                    let decoded=load_content(blob.get("content").cloned().unwrap_or(Value::Null))?;
+                    if decoded.get("html").and_then(Value::as_str)!=blob.get("expected_html").and_then(Value::as_str){return Err(AxError::new("fixture",format!("App blob body mismatch: {decoded}")))}
+                    for case in fixture.get("pre_initialize_cases").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let message=case.get("message").cloned().unwrap_or(Value::Null);
+                        match case.get("expected_error_contains").and_then(Value::as_str){
+                            Some(expected)=>match bridge.handle_view_message(message){
+                                Ok(value)=>return Err(AxError::new("fixture",format!("pre-initialize notification accepted: {value:?}"))),
+                                Err(error)=>{if !error.to_string().contains(expected){return Err(AxError::new("fixture",format!("pre-initialize error mismatch: {error}")))}}
+                            },
+                            None=>{
+                                let actual=bridge.handle_view_message(message)?.unwrap_or(Value::Null);
+                                if &actual!=case.get("expected_response").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("pre-initialize response mismatch: {actual}")))}
+                            }
+                        }
+                    }
+                    let initialized=bridge.handle_view_message(fixture.get("initialize_message").cloned().unwrap_or(Value::Null))?.unwrap_or(Value::Null);
+                    if &initialized!=fixture.get("expected_initialize_response").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("App initialize response mismatch: {initialized}")))}
+                    bridge.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+                    if !bridge.is_initialized(){return Err(AxError::new("fixture","App bridge ignored its initialized notification"))}
+                    for case in fixture.get("request_cases").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let note=case.get("note").and_then(Value::as_str).unwrap_or_default().to_string();
+                        if let Some(response)=case.get("response"){transport.lock().unwrap().script_response(response.clone())?}
+                        let request_start=transport.lock().unwrap().sent_requests().len();
+                        let link_start=links.lock().unwrap().len();
+                        let update_start=updates.lock().unwrap().len();
+                        let actual=bridge.handle_view_message(case.get("message").cloned().unwrap_or(Value::Null))?.unwrap_or(Value::Null);
+                        if &actual!=case.get("expected_response").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("App response mismatch ({note}): {actual}")))}
+                        let calls=transport.lock().unwrap().sent_requests().into_iter().skip(request_start).filter(|request|request.get("method").and_then(Value::as_str)==Some("tools/call")).collect::<Vec<_>>();
+                        if let Some(expected)=case.get("expected_tool_request"){
+                            if calls.len()!=1{return Err(AxError::new("fixture",format!("App tool call count mismatch ({note}): {}",calls.len())))}
+                            if calls[0].get("params").unwrap_or(&Value::Null)!=expected{return Err(AxError::new("fixture",format!("App tool call params mismatch ({note})")))}
+                        }
+                        if let Some(expected)=case.get("expected_tool_requests").and_then(Value::as_u64){
+                            if calls.len()!=expected as usize{return Err(AxError::new("fixture",format!("App tool call count mismatch ({note}): {} calls reached the server",calls.len())))}
+                        }
+                        if let Some(expected)=case.get("expected_open_links").and_then(Value::as_u64){
+                            let opened=links.lock().unwrap().len()-link_start;
+                            if opened!=expected as usize{return Err(AxError::new("fixture",format!("App open-link count mismatch ({note}): {opened}")))}
+                        }
+                        if let Some(expected)=case.get("expected_opened_url").and_then(Value::as_str){
+                            if links.lock().unwrap().last().map(String::as_str)!=Some(expected){return Err(AxError::new("fixture",format!("App opened url mismatch ({note})")))}
+                        }
+                        if let Some(expected)=case.get("expected_model_context_update"){
+                            let recorded=updates.lock().unwrap().iter().skip(update_start).cloned().collect::<Vec<_>>();
+                            if recorded.len()!=1||&recorded[0]!=expected{return Err(AxError::new("fixture",format!("App model-context update mismatch ({note}): {recorded:?}")))}
+                        }
+                    }
+                    // A bridge with no host callbacks reports each capability
+                    // disabled instead of silently dropping the request.
+                    let mut disabled=AxMCPAppBridge::new(client.clone(),&tool,AxMCPAppBridgeOptions::default())?;
+                    disabled.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+                    for case in fixture.get("disabled_cases").and_then(Value::as_array).cloned().unwrap_or_default(){
+                        let actual=disabled.handle_view_message(case.get("message").cloned().unwrap_or(Value::Null))?.unwrap_or(Value::Null);
+                        if &actual!=case.get("expected_response").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("disabled App response mismatch: {actual}")))}
+                    }
+                    let reserved=fixture.get("reserved_notification").cloned().unwrap_or_else(||json!({}));
+                    match bridge.handle_view_message(reserved.get("message").cloned().unwrap_or(Value::Null)){
+                        Ok(value)=>return Err(AxError::new("fixture",format!("reserved sandbox notification accepted: {value:?}"))),
+                        Err(error)=>{let expected=reserved.get("expected_error_contains").and_then(Value::as_str).unwrap_or_default();if !error.to_string().contains(expected){return Err(AxError::new("fixture",format!("reserved sandbox error mismatch: {error}")))}}
+                    }
+                    let size=fixture.get("size_notification").cloned().unwrap_or_else(||json!({}));
+                    bridge.handle_view_message(size.get("message").cloned().unwrap_or(Value::Null))?;
+                    {
+                        let recorded=sizes.lock().unwrap().clone();
+                        let expected=Value::Array(vec![size.get("expected_size").cloned().unwrap_or(Value::Null)]);
+                        if Value::Array(recorded.clone())!=expected{return Err(AxError::new("fixture",format!("App size notification mismatch: {recorded:?}")))}
+                    }
+                    sizes.lock().unwrap().clear();
+                    let invalid_size=fixture.get("invalid_size_notification").cloned().unwrap_or_else(||json!({}));
+                    bridge.handle_view_message(invalid_size.get("message").cloned().unwrap_or(Value::Null))?;
+                    if sizes.lock().unwrap().len()!=invalid_size.get("expected_sizes").and_then(Value::as_u64).unwrap_or_default() as usize{return Err(AxError::new("fixture","invalid size notification reached the host"))}
+                    // A denying authorizer stops the effect before the wire.
+                    let denied_options=AxMCPAppBridgeOptions{authorize:Some(Arc::new(|_request|Ok(false))),..Default::default()};
+                    let mut denied=AxMCPAppBridge::new(client.clone(),&tool,denied_options)?;
+                    denied.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+                    let denied_case=fixture.get("authorize_denied").cloned().unwrap_or_else(||json!({}));
+                    let request_start=transport.lock().unwrap().sent_requests().len();
+                    let actual=denied.handle_view_message(denied_case.get("message").cloned().unwrap_or(Value::Null))?.unwrap_or(Value::Null);
+                    if &actual!=denied_case.get("expected_response").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("denied App response mismatch: {actual}")))}
+                    let after=transport.lock().unwrap().sent_requests().len()-request_start;
+                    if after!=denied_case.get("expected_tool_requests").and_then(Value::as_u64).unwrap_or_default() as usize{return Err(AxError::new("fixture","a denied App request still reached the server"))}
+                    sent.lock().unwrap().clear();
+                    bridge.notify_tool_input(json!({"item":"sku-2"}))?;
+                    bridge.notify_tool_result(json!({"structuredContent":{"picked":"sku-2"}}))?;
+                    {
+                        let recorded=Value::Array(sent.lock().unwrap().clone());
+                        if &recorded!=fixture.get("expected_notifications").unwrap_or(&Value::Null){return Err(AxError::new("fixture",format!("App notifications mismatch: {recorded}")))}
+                    }
+                    bridge.teardown(fixture.get("teardown_reason").and_then(Value::as_str).unwrap_or_default())?;
+                    {
+                        let recorded=sent.lock().unwrap().clone();
+                        let last=recorded.last().cloned().unwrap_or(Value::Null);
+                        expect_subset("App teardown",&last,fixture.get("expected_teardown").unwrap_or(&Value::Null))?;
+                        if last.get("id")!=Some(&json!(1)){return Err(AxError::new("fixture",format!("App teardown id mismatch: {last}")))}
+                    }
+                    match bridge.notify_tool_input(json!({})){
+                        Ok(())=>Err(AxError::new("fixture","App still sends notifications after teardown")),
+                        Err(error)if error.to_string().contains("not initialized")=>Ok(()),
+                        Err(error)=>Err(AxError::new("fixture",format!("unexpected teardown error: {error}"))),
+                    }
+                }
                 _ => Err(AxError::new("fixture", format!("unsupported MCP conformance operation {operation}"))),
             }
         }
@@ -1830,5 +2338,203 @@ mod websocket_cleanup_tests {
         let abort=AxCancellationToken::default();let context=AxToolContext{cancellation:Some(abort.clone()),..Default::default()};
         let run=transport.clone();let requests=batch.clone();let cancelled=thread::spawn(move||run.send_batch(requests,&context));wait_sent(&socket,3);abort.cancel("stop");assert!(cancelled.join().unwrap().unwrap_err().message.contains("cancelled"));assert!(transport.state.lock().unwrap().pending.is_empty());
         let run=transport.clone();let closed=thread::spawn(move||run.send_batch(batch,&AxToolContext::default()));wait_sent(&socket,4);transport.close_socket();assert!(closed.join().unwrap().unwrap_err().message.contains("closed"));assert!(transport.state.lock().unwrap().pending.is_empty());Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sampling_and_app_tests {
+    use super::*;
+
+    fn scripted_client(responses: Vec<Value>, options: Value) -> AxMCPClient {
+        AxMCPClient::new(Box::new(AxMCPScriptedTransport::new(responses)), options)
+    }
+
+    fn initialize_response() -> Value {
+        json!({"method":"initialize","result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"scripted-mcp","version":"1.0.0"}}})
+    }
+
+    fn app_responses() -> Vec<Value> {
+        vec![
+            initialize_response(),
+            json!({"method":"tools/list","result":{"tools":[
+                {"name":"picker","description":"Pick an item","inputSchema":{"type":"object","properties":{}},"_meta":{"ui":{"resourceUri":"ui://shop/picker","visibility":["model","app"]}}},
+                {"name":"model_only","description":"Model only","inputSchema":{"type":"object","properties":{}},"_meta":{"ui":{"visibility":["model"]}}}
+            ]}}),
+            json!({"method":"resources/list","result":{"resources":[]}}),
+            json!({"method":"resources/templates/list","result":{"resourceTemplates":[]}}),
+        ]
+    }
+
+    fn initialize_capabilities(client: &AxMCPClient) -> Value {
+        client
+            .transport
+            .lock()
+            .unwrap()
+            .sent_requests()
+            .into_iter()
+            .find(|request| request.get("method").and_then(Value::as_str) == Some("initialize"))
+            .and_then(|request| request.get("params").and_then(|params| params.get("capabilities")).cloned())
+            .unwrap_or(Value::Null)
+    }
+
+    // Sampling is advertised from what the client can actually answer, so a
+    // client with no handler must neither claim it nor accept the request.
+    #[test]
+    fn sampling_is_advertised_and_answered_only_with_a_handler() -> AxResult<()> {
+        let mut plain = scripted_client(vec![initialize_response()], json!({"era":"legacy"}));
+        plain.init()?;
+        assert!(initialize_capabilities(&plain).get("sampling").is_none(), "advertised sampling without a handler");
+        plain.transport.lock().unwrap().inject_server_request(json!({"jsonrpc":"2.0","id":"s-1","method":"sampling/createMessage","params":{"messages":[],"maxTokens":8}}))?;
+        let refusal = plain.transport.lock().unwrap().sent_responses();
+        assert_eq!(refusal.len(), 1);
+        assert_eq!(refusal[0]["error"]["code"], json!(-32601));
+
+        let calls = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = calls.clone();
+        let mut client = scripted_client(vec![initialize_response()], json!({"era":"legacy"}));
+        client.set_sampling_handler(move |params, _context| {
+            captured.lock().unwrap().push(params);
+            Ok(json!({"role":"assistant","content":{"type":"text","text":"sampled"},"model":"scripted-model","stopReason":"endTurn"}))
+        });
+        client.init()?;
+        assert!(initialize_capabilities(&client).get("sampling").is_some(), "handler installed but capability withheld");
+        client.transport.lock().unwrap().inject_server_request(json!({"jsonrpc":"2.0","id":"s-2","method":"sampling/createMessage","params":{"messages":[{"role":"user","content":{"type":"text","text":"hi"}}],"maxTokens":8}}))?;
+        let answered = client.transport.lock().unwrap().sent_responses();
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0]["result"]["content"]["text"], json!("sampled"));
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        // A missing messages array is a protocol violation, not a handler call.
+        client.transport.lock().unwrap().inject_server_request(json!({"jsonrpc":"2.0","id":"s-3","method":"sampling/createMessage","params":{"maxTokens":8}}))?;
+        let responses = client.transport.lock().unwrap().sent_responses();
+        assert_eq!(responses[1]["error"]["code"], json!(-32602));
+        assert_eq!(calls.lock().unwrap().len(), 1, "invalid params reached the handler");
+        Ok(())
+    }
+
+    // A JSON option cannot run a model, so a truthy "sampling" option is a
+    // configuration error rather than an advertised capability.
+    #[test]
+    fn a_truthy_sampling_option_is_refused() {
+        let mut client = scripted_client(vec![initialize_response()], json!({"era":"legacy","sampling":true}));
+        let error = client.init().expect_err("truthy sampling option was accepted");
+        assert!(error.to_string().contains("sampling requires a callable handler"), "{error}");
+    }
+
+    // A host that grants a mode the protocol does not define is a host bug:
+    // the request fails instead of handing the frame "cinema" as a success.
+    #[test]
+    fn a_host_cannot_grant_an_undefined_display_mode() -> AxResult<()> {
+        let mut client = scripted_client(app_responses(), json!({"era":"legacy","namespace":"shop"}));
+        client.init()?;
+        let options = AxMCPAppBridgeOptions {
+            request_display_mode: Some(Arc::new(|_mode| Ok("cinema".to_string()))),
+            ..Default::default()
+        };
+        let mut bridge = AxMCPAppBridge::new(Arc::new(Mutex::new(client)), "picker", options)?;
+        bridge.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+        let response = bridge
+            .handle_view_message(json!({"jsonrpc":"2.0","id":"mode-1","method":"ui/request-display-mode","params":{"mode":"fullscreen"}}))?
+            .expect("a request is always answered");
+        assert!(response.get("result").is_none(), "an invalid host mode was answered as a success: {response}");
+        assert_eq!(response["error"]["code"], json!(-32000));
+        assert_eq!(response["error"]["message"], json!("host granted an invalid MCP App display mode cinema"));
+        Ok(())
+    }
+
+    // A request carries an id even when that id is null, so its refusal is a
+    // JSON-RPC error envelope with a null id, not a raised host error.
+    #[test]
+    fn a_null_request_id_still_gets_an_error_envelope() -> AxResult<()> {
+        let mut client = scripted_client(app_responses(), json!({"era":"legacy","namespace":"shop"}));
+        client.init()?;
+        let mut bridge = AxMCPAppBridge::new(Arc::new(Mutex::new(client)), "picker", AxMCPAppBridgeOptions::default())?;
+        bridge.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+        let response = bridge
+            .handle_view_message(json!({"jsonrpc":"2.0","id":Value::Null,"method":"ui/mystery"}))?
+            .expect("a request with a null id is still answered");
+        assert_eq!(response["id"], Value::Null);
+        assert!(response.as_object().is_some_and(|map| map.contains_key("id")), "the envelope dropped its null id: {response}");
+        assert_eq!(response["error"]["message"], json!("Unsupported MCP App request: ui/mystery"));
+        Ok(())
+    }
+
+    // A host callback that fails is answered to the frame when it was a
+    // request, and raised to the host when it was a notification: there is no
+    // envelope to put a notification failure in.
+    #[test]
+    fn a_failing_host_callback_answers_a_request_and_raises_a_notification() -> AxResult<()> {
+        let mut client = scripted_client(app_responses(), json!({"era":"legacy","namespace":"shop"}));
+        client.init()?;
+        let options = AxMCPAppBridgeOptions {
+            open_link: Some(Arc::new(|_url| Err(AxError::new("host", "browser is closed")))),
+            size_changed: Some(Arc::new(|_size| Err(AxError::new("host", "frame is gone")))),
+            ..Default::default()
+        };
+        let mut bridge = AxMCPAppBridge::new(Arc::new(Mutex::new(client)), "picker", options)?;
+        bridge.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+        let response = bridge
+            .handle_view_message(json!({"jsonrpc":"2.0","id":"link-1","method":"ui/open-link","params":{"url":"https://example.com"}}))?
+            .expect("a request is always answered");
+        assert_eq!(response["error"]["message"], json!("browser is closed"));
+        let error = bridge
+            .handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/size-changed","params":{"width":640,"height":480}}))
+            .expect_err("a failing notification callback was swallowed");
+        assert_eq!(error.to_string(), "frame is gone");
+        Ok(())
+    }
+
+    // A teardown the host could not deliver leaves the bridge initialized, so
+    // the host can retry; a delivered one closes it and stops notifications.
+    #[test]
+    fn teardown_keeps_the_bridge_open_when_the_host_cannot_deliver() -> AxResult<()> {
+        let mut client = scripted_client(app_responses(), json!({"era":"legacy","namespace":"shop"}));
+        client.init()?;
+        let fail = Arc::new(AtomicBool::new(true));
+        let sent = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let options = {
+            let (fail, sent) = (fail.clone(), sent.clone());
+            AxMCPAppBridgeOptions {
+                send_to_view: Some(Arc::new(move |message| {
+                    if fail.load(Ordering::SeqCst) { return Err(AxError::new("host", "frame is detached")); }
+                    sent.lock().unwrap().push(message);
+                    Ok(())
+                })),
+                ..Default::default()
+            }
+        };
+        let mut bridge = AxMCPAppBridge::new(Arc::new(Mutex::new(client)), "picker", options)?;
+        bridge.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+        let error = bridge.teardown("navigated away").expect_err("an undelivered teardown reported success");
+        assert_eq!(error.to_string(), "frame is detached");
+        assert!(bridge.is_initialized(), "an undelivered teardown closed the bridge anyway");
+        fail.store(false, Ordering::SeqCst);
+        bridge.teardown("navigated away")?;
+        assert!(!bridge.is_initialized(), "a delivered teardown left the bridge open");
+        let recorded = sent.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        // The first attempt spent id 1, so the delivered teardown is id 2.
+        assert_eq!(recorded[0]["id"], json!(2));
+        assert_eq!(recorded[0]["method"], json!("ui/resource-teardown"));
+        let after = bridge.notify_tool_input(json!({})).expect_err("notifications continued after teardown");
+        assert!(after.to_string().contains("not initialized"), "{after}");
+        Ok(())
+    }
+
+    // The frame may only reach a tool Core says is app-visible, and a refusal
+    // must happen before anything goes on the wire.
+    #[test]
+    fn an_app_frame_cannot_call_a_model_only_tool() -> AxResult<()> {
+        let mut client = scripted_client(app_responses(), json!({"era":"legacy","namespace":"shop"}));
+        client.init()?;
+        let transport = client.transport.clone();
+        let mut bridge = AxMCPAppBridge::new(Arc::new(Mutex::new(client)), "picker", AxMCPAppBridgeOptions::default())?;
+        bridge.handle_view_message(json!({"jsonrpc":"2.0","method":"ui/notifications/initialized"}))?;
+        let before = transport.lock().unwrap().sent_requests().len();
+        let response = bridge
+            .handle_view_message(json!({"jsonrpc":"2.0","id":"c-1","method":"tools/call","params":{"name":"model_only","arguments":{}}}))?
+            .expect("a request is always answered");
+        assert_eq!(response["error"]["message"], json!("MCP App cannot call tool model_only"));
+        assert_eq!(transport.lock().unwrap().sent_requests().len(), before, "a refused App call reached the server");
+        Ok(())
     }
 }

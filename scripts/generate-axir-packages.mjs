@@ -46,6 +46,21 @@ try {
     });
     console.log(`generated packages/${target}`);
   }
+  // Lisp's native sources live in its package, not compiler templates.
+  // Regenerate only compiler-owned files rather than replacing that tree.
+  run(
+    process.execPath,
+    [
+      runAxirScript,
+      'compile',
+      '--target',
+      'lisp',
+      '--out',
+      path.join(packagesRoot, 'lisp'),
+      rootAxir,
+    ],
+    { cwd: repoRoot, env }
+  );
 } finally {
   await rm(stageRoot, { recursive: true, force: true });
 }

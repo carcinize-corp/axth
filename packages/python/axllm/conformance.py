@@ -71,6 +71,7 @@ from .flow import (
     _flow_condition_from_spec,
     _flow_merge_parallel_results,
     _flow_mapper_from_spec,
+    _flow_mermaid_parse,
     _flow_step,
     _program_descriptor,
     flow,
@@ -2057,10 +2058,14 @@ def _run_flow_mermaid(fixture):
             fl.execute(step["name"], ax(step["signature"]), options)
         _assert_equal(str(fl), fixture["expected_rendered"], "flow mermaid builder render")
         return
+    if operation not in (None, "roundtrip"):
+        raise FixtureError(f"unknown flow mermaid operation {operation!r}")
     first = flow(fixture["document"], bindings)
-    expected = fixture.get("expected_rerendered") or fixture["expected_rendered"]
-    _assert_equal(str(first), expected, "flow mermaid render")
+    if "expected_direction" in fixture:
+        _assert_equal(_flow_mermaid_parse(fixture["document"])["direction"], fixture["expected_direction"], "flow mermaid source direction")
+    _assert_equal(str(first), fixture["expected_rendered"], "flow mermaid render")
     second = flow(str(first), bindings)
+    expected = fixture.get("expected_rerendered", fixture["expected_rendered"])
     _assert_equal(str(second), expected, "flow mermaid canonical roundtrip")
 
 

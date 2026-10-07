@@ -122,7 +122,7 @@ func scrubbedEnviron() []string {
 	var env []string
 	for _, kv := range os.Environ() {
 		name, _, ok := strings.Cut(kv, "=")
-		if ok && (strings.HasSuffix(name, "_BASE_URL") || strings.HasSuffix(name, "_API_KEY")) {
+		if ok && (strings.HasSuffix(name, "_BASE_URL") || strings.HasSuffix(name, "_API_KEY") || strings.HasSuffix(name, "_APIKEY")) {
 			continue
 		}
 		env = append(env, kv)
@@ -147,9 +147,19 @@ func verifyOneTarget(index int, target string, bundle Bundle, workDir string, co
 	}
 	targetReport.finishStep("compile", "ok", targetReport.OutDir, start)
 	start = targetReport.startStep("manifest")
-	if err := verifyManifest(targetReport.OutDir, target); err != nil {
-		targetReport.finishStep("manifest", "fail", err.Error(), start)
-		return verifyTargetResult{index: index, report: targetReport, failure: fmt.Sprintf("%s manifest: %v", target, err)}
+	// Lisp additionally reconciles its native declaration with the manifests.
+	var manifestErr error
+	if target == "lisp" {
+		manifestErr = VerifyLispManifest(targetReport.OutDir)
+		if manifestErr == nil {
+			manifestErr = requireLispFullDeclaration(targetReport.OutDir)
+		}
+	} else {
+		manifestErr = verifyManifest(targetReport.OutDir, target)
+	}
+	if manifestErr != nil {
+		targetReport.finishStep("manifest", "fail", manifestErr.Error(), start)
+		return verifyTargetResult{index: index, report: targetReport, failure: fmt.Sprintf("%s manifest: %v", target, manifestErr)}
 	}
 	targetReport.finishStep("manifest", "ok", "axir-capabilities.json", start)
 	start = targetReport.startStep("provenance")
@@ -185,6 +195,8 @@ func verifyOneTarget(index int, target string, bundle Bundle, workDir string, co
 		targetReport, targetErr = verifyGoTarget(targetReport, conformanceRoot)
 	case "rust":
 		targetReport, targetErr = verifyRustTarget(targetReport, conformanceRoot)
+	case "lisp":
+		targetReport, targetErr = verifyLispTarget(targetReport, conformanceRoot)
 	default:
 		targetErr = fmt.Errorf("unknown verify target %q", target)
 	}
@@ -421,7 +433,7 @@ func verifyRustQuickJSProfile(report VerifyTargetReport) (VerifyTargetReport, er
 
 func normalizeVerifyTargets(targets []string) []string {
 	if len(targets) == 0 {
-		return []string{"python", "java", "cpp", "go", "rust"}
+		return []string{"python", "java", "cpp", "go", "rust", "lisp"}
 	}
 	out := make([]string, 0, len(targets))
 	seen := map[string]bool{}
@@ -744,6 +756,156 @@ func verifyManifest(outDir, target string) error {
 	}
 	if err := ValidateConformanceCoverage(manifest, coverage); err != nil {
 		return err
+	}
+	return nil
+}
+
+// verifyLispTarget runs the verification the Lisp target can actually
+// support today, and says plainly what it cannot.
+//
+// It compiles the whole emitted Core file in SBCL with no native boundary
+// defined, which proves the file is valid Common Lisp and that every name
+// it calls is defined in the file or forward-declared. Native conformance
+// claims additionally require a complete package and an executed runner.
+func verifyLispTarget(report VerifyTargetReport, conformanceRoot string) (VerifyTargetReport, error) {
+	coreFile := filepath.Join(report.OutDir, filepath.FromSlash(lispProvenanceCoreFile))
+	sbcl, err := exec.LookPath("sbcl")
+	if err != nil {
+		report.Steps = append(report.Steps, VerifyStep{
+			Name:    "sbcl compile",
+			Status:  "fail",
+			Message: "sbcl not found; install SBCL to compile the generated Common Lisp",
+		})
+		return report, err
+	} else {
+		start := report.startStep("sbcl compile")
+		message, err := VerifyLispGeneratedFileCompiles(sbcl, coreFile, report.OutDir)
+		if err != nil {
+			report.finishStep("sbcl compile", "fail", err.Error(), start)
+			return report, err
+		}
+		report.finishStep("sbcl compile", "ok", message, start)
+	}
+
+	start := report.startStep("package shape")
+	if err := ValidateLispPackageIsLoadable(report.OutDir); err != nil {
+		report.finishStep("package shape", "fail", err.Error(), start)
+		return report, err
+	}
+	report.finishStep("package shape", "ok", "axllm.asd and every component it names are present", start)
+
+	start = report.startStep("native boundaries")
+	boundaryData, err := os.ReadFile(filepath.Join(report.OutDir, filepath.FromSlash(lispBoundaryManifestFile)))
+	if err != nil {
+		report.finishStep("native boundaries", "fail", err.Error(), start)
+		return report, err
+	}
+	var boundaries LispBoundaryManifest
+	if err := json.Unmarshal(boundaryData, &boundaries); err != nil {
+		report.finishStep("native boundaries", "fail", err.Error(), start)
+		return report, err
+	}
+	if err := verifyLispNativeBoundaries(report.OutDir, boundaries); err != nil {
+		report.finishStep("native boundaries", "fail", err.Error(), start)
+		return report, err
+	}
+	report.finishStep("native boundaries", "ok", fmt.Sprintf(
+		"%d native definitions with compatible arities for %d emitted functions (behavior requires conformance)",
+		len(boundaries.Boundaries), len(boundaries.Functions)), start)
+
+	declaration, err := LoadLispConformanceDeclaration(report.OutDir)
+	if err != nil {
+		report.Steps = append(report.Steps, VerifyStep{Name: "conformance", Status: "fail", Message: err.Error()})
+		return report, err
+	}
+	if declaration == nil {
+		err := fmt.Errorf("required %s is absent; compilation alone does not prove conformance", LispConformanceDeclarationFile)
+		report.Steps = append(report.Steps, VerifyStep{
+			Name:    "conformance",
+			Status:  "fail",
+			Message: err.Error(),
+		})
+		return report, err
+	}
+	if _, err := exec.LookPath(declaration.Command[0]); err != nil {
+		report.Steps = append(report.Steps, VerifyStep{
+			Name:    "conformance",
+			Status:  "fail",
+			Message: fmt.Sprintf("%s not found; cannot verify the declared suites", declaration.Command[0]),
+		})
+		return report, err
+	}
+	name := fmt.Sprintf("conformance (%s)", declaration.Runner)
+	// Never reuse evidence from a prior invocation of the declared runner.
+	reportPath, err := filepath.Abs(filepath.Join(report.OutDir, "axir-lisp-conformance-report.json"))
+	if err != nil {
+		return report, err
+	}
+	if err := os.Remove(reportPath); err != nil && !os.IsNotExist(err) {
+		return report, err
+	}
+	conformanceRoot = absoluteRootFile(conformanceRoot)
+	env := runtimeProtocolEnv(conformanceRoot, append(scrubbedEnviron(),
+		"AXIR_CONFORMANCE_DIR="+conformanceRoot,
+		LispConformanceReportEnv+"="+reportPath))
+	if err := runVerifyCommand(&report, name, report.OutDir, env,
+		declaration.Command[0], declaration.Command[1:]...); err != nil {
+		return report, err
+	}
+	// Exit zero alone cannot distinguish passing fixtures from no dispatch.
+	start = report.startStep("conformance evidence")
+	conformanceReport, err := LoadLispConformanceReport(reportPath)
+	if err != nil {
+		report.finishStep("conformance evidence", "fail", err.Error(), start)
+		return report, err
+	}
+	if err := ReconcileLispConformanceReport(conformanceReport, declaration, conformanceRoot); err != nil {
+		report.finishStep("conformance evidence", "fail", err.Error(), start)
+		return report, err
+	}
+	report.finishStep("conformance evidence", "ok", fmt.Sprintf(
+		"%d fixture(s) reconciled across %s", len(conformanceReport.Fixtures),
+		strings.Join(LispRequiredConformanceSuites(declaration.Suites), ", ")), start)
+	for _, example := range declaration.NoKeyExamples {
+		if err := runVerifyCommand(&report, "example "+example, report.OutDir, env, sbcl, "--script", example); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+func requireLispFullDeclaration(outDir string) error {
+	declaration, err := LoadLispConformanceDeclaration(outDir)
+	if err != nil {
+		return err
+	}
+	if declaration == nil {
+		return fmt.Errorf("required %s is absent", LispConformanceDeclarationFile)
+	}
+	if len(declaration.Suites) != len(lispConformanceSuites()) || !declaration.NativeBoundaries ||
+		(!declaration.ScriptedTransport && !declaration.RealNetwork) ||
+		len(declaration.NoKeyExamples) == 0 || len(declaration.RuntimeProfiles) == 0 {
+		return fmt.Errorf("%s must declare all suites, nativeBoundaries, transport, noKeyExamples and runtimeProfiles for default verification", LispConformanceDeclarationFile)
+	}
+	return nil
+}
+
+func verifyLispNativeBoundaries(outDir string, manifest LispBoundaryManifest) error {
+	shapes, _, err := LoadLispNativeLambdaShapes(filepath.Join(outDir, "src"), "core.lisp")
+	if err != nil {
+		return err
+	}
+	var problems []string
+	for _, boundary := range manifest.Boundaries {
+		if _, ok := shapes[boundary.Name]; !ok {
+			problems = append(problems, "undefined native boundary "+boundary.Name)
+		}
+	}
+	for _, problem := range CheckLispBoundaryArities(manifest, shapes) {
+		problems = append(problems, problem.String())
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("native boundary verification failed: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }

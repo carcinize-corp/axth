@@ -4488,10 +4488,16 @@ static void run_flow_mermaid(Value fixture) {
     assert_equal(built.str(), Core::get(fixture, "expected_rendered"), "flow mermaid builder render");
     return;
   }
+  if (!Core::get(fixture, "operation").is_null() && operation != "roundtrip") {
+    throw AxError("fixture", "unknown flow mermaid operation " + operation);
+  }
   AxFlow first(display(Core::get(fixture, "document")), bindings);
-  Value expected = Core::get(fixture, "expected_rerendered", Core::get(fixture, "expected_rendered"));
-  assert_equal(first.str(), expected, "flow mermaid render");
+  if (Core::truthy(Core::map_contains(fixture, "expected_direction"))) {
+    assert_equal(Core::get(Core::_flow_mermaid_parse(Core::get(fixture, "document")), "direction"), Core::get(fixture, "expected_direction"), "flow mermaid source direction");
+  }
+  assert_equal(first.str(), Core::get(fixture, "expected_rendered"), "flow mermaid render");
   AxFlow second(first.str(), bindings);
+  Value expected = Core::get(fixture, "expected_rerendered", Core::get(fixture, "expected_rendered"));
   assert_equal(second.str(), expected, "flow mermaid canonical roundtrip");
 }
 

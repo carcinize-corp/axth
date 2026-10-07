@@ -70,6 +70,7 @@ def _core_and(left, right): return bool(left and right)
 def _core_or(left, right): return bool(left or right)
 def _core_not(value): return not bool(value)
 def _core_eq(left, right): return left == right
+def _core_ne(left, right): return left != right
 def _core_lt(left, right): return left < right
 def _core_lte(left, right): return left <= right
 def _core_gt(left, right): return left > right
@@ -1030,8 +1031,8 @@ class AxMCPClient:
     def init(self) -> None:
         if self._initialized:
             return
-        if self.options.get("sampling"):
-            raise AxMCPError("MCP sampling is not supported by the generated Python client")
+        if self.options.get("sampling") and not callable(self.options["sampling"]):
+            raise AxMCPError("MCP sampling requires a callable handler")
         self.transport.connect()
         configured = str(self.options.get("era", "auto"))
         key = self.transport.era_cache_key
@@ -1326,13 +1327,15 @@ class AxMCPClient:
                     outcome.get("inputRequests"),
                     self.options.get("roots"),
                     callable(handler),
-                    False,
+                    callable(self.options.get("sampling")),
                 )
                 if not fulfillment.get("ok"):
                     raise AxMCPError(str(fulfillment.get("message", "MCP protocol violation")))
                 responses = dict(fulfillment.get("responses") or {})
                 for key, pending in (fulfillment.get("pending") or {}).items():
-                    if pending.get("method") != "elicitation/create" or not callable(handler):
+                    handler = {"elicitation/create": self.options.get("elicitation"),
+                               "sampling/createMessage": self.options.get("sampling")}.get(pending.get("method"))
+                    if not callable(handler):
                         raise AxMCPError(f"MCP protocol violation: unsupported pending task input request method {pending.get('method')}")
                     responses[key] = handler(
                         pending.get("params") or {},
@@ -1575,14 +1578,16 @@ class AxMCPClient:
                 roots = self.options.get("roots") if "roots" in self.options else None
                 elicitation = self.options.get("elicitation")
                 has_elicitation = callable(elicitation)
-                fulfillment = mcp_mrtr_plan_fulfillment(requests, roots, has_elicitation, False)
+                fulfillment = mcp_mrtr_plan_fulfillment(requests, roots, has_elicitation, callable(self.options.get("sampling")))
                 if not fulfillment.get("ok"):
                     raise AxMCPError(str(fulfillment.get("message", "MCP protocol violation")))
                 input_responses = dict(fulfillment.get("responses") or {})
                 for key, pending in (fulfillment.get("pending") or {}).items():
-                    if pending.get("method") != "elicitation/create":
+                    handler = {"elicitation/create": elicitation,
+                               "sampling/createMessage": self.options.get("sampling")}.get(pending.get("method"))
+                    if not callable(handler):
                         raise AxMCPError(f"MCP protocol violation: unsupported pending MRTR input request method {pending.get('method')}")
-                    input_responses[key] = elicitation(
+                    input_responses[key] = handler(
                         pending.get("params") or {},
                         {"client": self, "namespace": self.namespace()},
                     )
@@ -1639,10 +1644,12 @@ class AxMCPClient:
     def _client_capabilities(self) -> dict[str, Any]:
         capabilities = dict(self.options.get("capabilities") or {})
         has_elicitation = callable(self.options.get("elicitation"))
-        derived = mcp_client_capabilities(bool(self.options.get("roots")), False, has_elicitation, self.era or "legacy", self.options.get("tasksExtension") is not False)
+        has_sampling = callable(self.options.get("sampling"))
+        derived = mcp_client_capabilities(bool(self.options.get("roots")), has_sampling, has_elicitation, self.era or "legacy", self.options.get("tasksExtension") is not False)
         for key, value in derived.items():
             capabilities.setdefault(key, value)
-        capabilities.pop("sampling", None)
+        if not has_sampling:
+            capabilities.pop("sampling", None)
         if not has_elicitation:
             capabilities.pop("elicitation", None)
         return capabilities
@@ -1682,13 +1689,16 @@ class AxMCPClient:
 
     def _handle_server_request(self, message: dict[str, Any]) -> dict[str, Any]:
         handler = self.options.get("elicitation")
-        plan = mcp_server_request_plan(
+        plan = mcp_server_request_plan_full(
             message,
             self.options.get("roots"),
             callable(handler),
+            callable(self.options.get("sampling")),
         )
         if plan.get("action") == "respond":
             return dict(plan.get("response") or {})
+        if plan.get("action") == "sampling":
+            handler = self.options["sampling"]
         try:
             result = handler(
                 plan.get("params") or {},
@@ -1733,6 +1743,126 @@ class AxMCPClient:
         name = _override_name("resource_template_" + _safe_name(template.get("name", "template")), self.options)
         description = _override_description(template, self.options)
         return Tool(name, description, {"type": "object", "properties": {"uri": {"type": "string"}}}, lambda args: self.read_resource(args["uri"]))
+
+
+class AxMCPAppBridge:
+    """MCP Apps protocol bridge; the host renders the validated resource."""
+
+    def __init__(self, client: AxMCPClient, tool: str | dict[str, Any], options=None):
+        self.client = client
+        self.tool = next((item for item in client.tools if item.get("name") == tool), None) if isinstance(tool, str) else tool
+        if self.tool is None:
+            raise AxMCPError(f"MCP App tool not found: {tool}")
+        self.options = dict(options or {})
+        self.initialized = False
+        self._next_id = 1
+
+    def load_resource(self):
+        uri = mcp_app_tool_meta(self.tool)["resourceUri"]
+        if not uri.startswith("ui://"):
+            raise AxMCPError(f"MCP App tool {self.tool['name']} has no valid ui:// resource")
+        response = self.client.read_resource(uri)
+        item = next((value for value in response.get("contents", []) if value.get("uri") == uri), None)
+        if item is None:
+            raise AxMCPError(f"MCP App resource {uri} was not returned")
+        if "text" in item:
+            html = item["text"]
+        else:
+            try:
+                html = base64.b64decode(item.get("blob", ""), validate=True).decode("utf-8", errors="replace")
+            except (ValueError, TypeError) as error:
+                raise AxMCPError("MCP App resource blob is not valid base64 HTML") from error
+        meta = (item.get("_meta") or {}).get("ui")
+        plan = mcp_app_resource_plan(self.tool["name"], uri, item.get("mimeType", "<missing>"), html,
+                                     json.loads(json.dumps(meta)) if isinstance(meta, dict) else {})
+        if not plan["ok"]:
+            raise AxMCPError(plan["message"])
+        return plan["resource"]
+
+    def handle_view_message(self, message):
+        context = {
+            "namespace": self.client.namespace(), "tool": self.tool["name"], "tools": self.client.tools,
+            "hostCapabilities": self.options.get("hostCapabilities"), "hostContext": self.options.get("hostContext"),
+            "canOpenLink": callable(self.options.get("openLink")),
+            "canSendMessage": callable(self.options.get("sendMessage")),
+            "canUpdateModelContext": callable(self.options.get("updateModelContext")),
+        }
+        try:
+            plan = mcp_app_view_message_plan(message, self.initialized, context)
+            action = plan["action"]
+            if action == "error":
+                raise AxMCPError(plan["reason"])
+            if action == "initialized":
+                self.initialized = True
+                return None
+            if action == "ignore":
+                return None
+            if action in {"log", "size-changed"}:
+                callback = self.options.get("log" if action == "log" else "sizeChanged")
+                if callable(callback):
+                    callback(plan.get("params") if action == "log" else plan["size"])
+                return None
+            result = {}
+            if action == "respond":
+                result = plan["result"]
+            else:
+                authorize = self.options.get("authorize")
+                if callable(authorize) and authorize({"method": action, "params": message.get("params"),
+                                                       "namespace": self.client.namespace(), "tool": self.tool["name"]}) is False:
+                    raise AxMCPError(f"MCP App request denied: {action}")
+                if action == "call-tool":
+                    result = self.client.call_tool(plan["name"], plan["arguments"])
+                elif action == "read-resource":
+                    result = self.client.read_resource(plan["uri"])
+                elif action == "open-link":
+                    self.options["openLink"](plan["url"])
+                elif action == "send-message":
+                    self.options["sendMessage"](plan["params"])
+                elif action == "update-model-context":
+                    self.options["updateModelContext"](plan["update"])
+                elif action == "request-display-mode":
+                    callback = self.options.get("requestDisplayMode")
+                    mode = callback(plan["mode"]) if callable(callback) else "inline"
+                    if mode not in {"inline", "fullscreen", "pip"}:
+                        raise AxMCPError("Invalid MCP App display mode granted by host")
+                    result = {"mode": mode}
+                else:
+                    raise AxMCPError(f"Unknown MCP App action: {action}")
+            return {"jsonrpc": "2.0", "id": message["id"], "result": result}
+        except Exception as error:
+            if "id" not in message:
+                raise
+            return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32000, "message": str(error)}}
+
+    def _notify(self, method, params):
+        if not self.initialized:
+            raise AxMCPError("MCP App is not initialized")
+        callback = self.options.get("sendToView")
+        if callable(callback):
+            callback({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def notify_tool_input(self, arguments):
+        self._notify("ui/notifications/tool-input", {"arguments": arguments})
+
+    def notify_tool_input_partial(self, arguments):
+        self._notify("ui/notifications/tool-input-partial", {"arguments": arguments})
+
+    def notify_tool_result(self, result):
+        self._notify("ui/notifications/tool-result", result)
+
+    def notify_tool_cancelled(self, reason):
+        self._notify("ui/notifications/tool-cancelled", {"reason": reason})
+
+    def notify_host_context_changed(self, context):
+        self._notify("ui/notifications/host-context-changed", context)
+
+    def teardown(self, reason):
+        callback = self.options.get("sendToView")
+        request_id = self._next_id
+        self._next_id += 1
+        if callable(callback):
+            callback({"jsonrpc": "2.0", "id": request_id, "method": "ui/resource-teardown", "params": {"reason": reason}})
+        self.initialized = False
 
 
 class AxMCPEventSource(AxEventSource):
@@ -3101,6 +3231,12 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
         transport = AxMCPScriptedTransport(fixture.get("responses") or fixture.get("transport_responses") or [])
         client_options = dict(fixture.get("client_options") or {})
         elicitation_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        sampling_calls = []
+        if operation == "server_requests_sampling":
+            def fixture_sampling(params, context):
+                sampling_calls.append((params, context))
+                return dict(fixture["sampling_result"])
+            client_options["sampling"] = fixture_sampling
         if operation in {"mrtr_elicitation", "tasks_v2_input_required", "server_requests_legacy"}:
             def fixture_elicitation(params, context):
                 if params.get("fail"):
@@ -3117,6 +3253,31 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
         client.init()
         if operation != "client_discovery" and fixture.get("expected_protocol_version") and client.negotiated_protocol_version != fixture["expected_protocol_version"]:
             raise AssertionError("protocol version mismatch")
+        if operation == "app_bridge":
+            _run_mcp_app_bridge_fixture(fixture, client, transport)
+            return
+        if operation == "server_requests_sampling":
+            for request in fixture["server_requests"]:
+                transport.emit(request)
+            assert transport.sent_responses == fixture["expected_responses"], transport.sent_responses
+            assert len(sampling_calls) == fixture["expected_handler_calls"], sampling_calls
+            assert sampling_calls[0][0] == fixture["expected_handler_params"], sampling_calls[0][0]
+            assert sampling_calls[0][1]["client"] is client
+            _assert_subset(sampling_calls[0][1], fixture["expected_context"], "sampling context")
+            initialize = next(request for request in transport.requests if request["method"] == "initialize")
+            _assert_subset(initialize["params"]["capabilities"], fixture["expected_capabilities"], "sampling capabilities")
+            plain_transport = AxMCPScriptedTransport(fixture["responses"])
+            plain = AxMCPClient(plain_transport, fixture["client_options"])
+            plain.init()
+            without = fixture["without_handler"]
+            plain_transport.emit(without["server_request"])
+            assert plain_transport.sent_responses == [without["expected_response"]], plain_transport.sent_responses
+            plain_initialize = next(request for request in plain_transport.requests if request["method"] == "initialize")
+            for name in without["forbidden_capabilities"]:
+                assert name not in plain_initialize["params"]["capabilities"], name
+            for case in fixture["legacy_plan_cases"]:
+                assert mcp_server_request_plan(case["request"], None, False) == case["expected"], case
+            return
         if operation == "client_discovery":
             if fixture.get("call_tool"):
                 call = fixture["call_tool"]
@@ -3218,7 +3379,7 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
             try:
                 bad.init()
             except Exception as error:
-                if "sampling is not supported" not in str(error):
+                if "sampling requires a callable handler" not in str(error):
                     raise
             else:
                 raise AssertionError("truthy sampling option was accepted")
@@ -3345,6 +3506,101 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
         if expected_error and expected_error in str(exc):
             return
         raise
+
+
+def _run_mcp_app_bridge_fixture(fixture, client, transport):
+    sent, links, updates, sizes = [], [], [], []
+    bridge = AxMCPAppBridge(client, fixture["tool"], {
+        "sendToView": sent.append, "openLink": links.append,
+        "updateModelContext": updates.append, "sizeChanged": sizes.append,
+        "requestDisplayMode": lambda _mode: "inline",
+    })
+    tools = {tool["name"]: tool for tool in client.tools}
+    assert mcp_app_tool_meta(tools[fixture["tool"]]) == fixture["expected_tool_meta"]
+    for case in fixture["visibility_cases"]:
+        assert mcp_app_tool_visible_to(tools[case["tool"]], case["principal"]) == case["expected"], case
+    transport.responses.append(fixture["resource_read"])
+    _assert_subset(bridge.load_resource(), fixture["expected_resource"], "App resource")
+
+    def load_content(content):
+        resource_transport = AxMCPScriptedTransport(fixture["responses"] + [
+            {"method": "resources/read", "result": {"contents": [content]}}])
+        resource_client = AxMCPClient(resource_transport, fixture["client_options"])
+        resource_client.init()
+        return AxMCPAppBridge(resource_client, fixture["tool"]).load_resource()
+
+    for case in fixture["invalid_resources"]:
+        try:
+            load_content(case["content"])
+        except AxMCPError as error:
+            assert case["expected_error_contains"] in str(error), str(error)
+        else:
+            raise AssertionError(f"invalid App resource accepted: {case['note']}")
+    blob = fixture["blob_resource"]
+    assert load_content(blob["content"])["html"] == blob["expected_html"]
+    for case in fixture["pre_initialize_cases"]:
+        if "expected_error_contains" in case:
+            try:
+                bridge.handle_view_message(case["message"])
+            except AxMCPError as error:
+                assert case["expected_error_contains"] in str(error), str(error)
+            else:
+                raise AssertionError("pre-initialize notification accepted")
+        else:
+            assert bridge.handle_view_message(case["message"]) == case["expected_response"]
+    assert bridge.handle_view_message(fixture["initialize_message"]) == fixture["expected_initialize_response"]
+    bridge.handle_view_message({"jsonrpc": "2.0", "method": "ui/notifications/initialized"})
+    for case in fixture["request_cases"]:
+        if "response" in case:
+            transport.responses.append(case["response"])
+        request_start, link_start, update_start = len(transport.requests), len(links), len(updates)
+        assert bridge.handle_view_message(case["message"]) == case["expected_response"], case["note"]
+        calls = [request for request in transport.requests[request_start:] if request["method"] == "tools/call"]
+        if "expected_tool_request" in case:
+            assert len(calls) == 1, calls
+            assert calls[0]["params"] == case["expected_tool_request"], calls
+        if "expected_tool_requests" in case:
+            assert len(calls) == case["expected_tool_requests"], calls
+        if "expected_open_links" in case:
+            assert len(links) - link_start == case["expected_open_links"], links
+        if "expected_opened_url" in case:
+            assert links[-1] == case["expected_opened_url"], links
+        if "expected_model_context_update" in case:
+            assert updates[update_start:] == [case["expected_model_context_update"]], updates
+    disabled = AxMCPAppBridge(client, fixture["tool"])
+    disabled.handle_view_message({"jsonrpc": "2.0", "method": "ui/notifications/initialized"})
+    for case in fixture["disabled_cases"]:
+        assert disabled.handle_view_message(case["message"]) == case["expected_response"], case
+    reserved = fixture["reserved_notification"]
+    try:
+        bridge.handle_view_message(reserved["message"])
+    except AxMCPError as error:
+        assert reserved["expected_error_contains"] in str(error), str(error)
+    else:
+        raise AssertionError("reserved sandbox notification accepted")
+    bridge.handle_view_message(fixture["size_notification"]["message"])
+    assert sizes == [fixture["size_notification"]["expected_size"]], sizes
+    sizes.clear()
+    bridge.handle_view_message(fixture["invalid_size_notification"]["message"])
+    assert len(sizes) == fixture["invalid_size_notification"]["expected_sizes"], sizes
+    denied = AxMCPAppBridge(client, fixture["tool"], {"authorize": lambda _action: False})
+    denied.handle_view_message({"jsonrpc": "2.0", "method": "ui/notifications/initialized"})
+    request_start = len(transport.requests)
+    case = fixture["authorize_denied"]
+    assert denied.handle_view_message(case["message"]) == case["expected_response"]
+    assert len(transport.requests) - request_start == case["expected_tool_requests"]
+    bridge.notify_tool_input({"item": "sku-2"})
+    bridge.notify_tool_result({"structuredContent": {"picked": "sku-2"}})
+    assert sent == fixture["expected_notifications"], sent
+    bridge.teardown(fixture["teardown_reason"])
+    _assert_subset(sent[-1], fixture["expected_teardown"], "App teardown")
+    assert sent[-1]["id"] == 1
+    try:
+        bridge.notify_tool_input({})
+    except AxMCPError as error:
+        assert "not initialized" in str(error), str(error)
+    else:
+        raise AssertionError("App still sends notifications after teardown")
 
 
 def _assert_requests(requests: list[dict[str, Any]], fixture: dict[str, Any]) -> None:

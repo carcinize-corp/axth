@@ -42,6 +42,8 @@ __pycache__
 gepa/
 src/data
 src/examples/.generated/
+*.fasl
+packages/lisp/tests/conformance-coverage.json
 packages/**/__pycache__/
 packages/**/*.pyc
 packages/**/.pytest_cache/

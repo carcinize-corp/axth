@@ -373,15 +373,37 @@ function exercisePublicSymbols(exercise, publicExports) {
   return [...candidates].filter((symbol) => publicExports.has(symbol));
 }
 
+function publishedSkillSlugs(slugs, language) {
+  if (slugs === undefined) {
+    throw new Error(
+      `buildAcademyPages needs the published skill slugs for ${language.id}: ` +
+        'in scripts/website-prepare.mjs pass { skillPageSlugs: ' +
+        '(inventory.languageSkills[language.id] ?? []).map(skillPageSlug) }, ' +
+        'the same inventory writeLanguageSkillPages publishes from. Without ' +
+        'it the lesson pages would have to guess skill routes, which is how ' +
+        '588 dead /skills/ links shipped.'
+    );
+  }
+  const list = slugs instanceof Set ? [...slugs] : slugs;
+  if (!Array.isArray(list)) {
+    throw new Error(
+      `buildAcademyPages skillPageSlugs for ${language.id} must be an array or a Set`
+    );
+  }
+  return new Set(list.map((slug) => String(slug)));
+}
+
 export function buildAcademyPages(course, language, options = {}) {
-  // `skillPageSlugs` lists the skill pages this language actually publishes, so
-  // source links can fall back instead of pointing at a page that is absent.
-  const localizedCourse = {
-    ...localizeAcademyCourse(course, language),
-    skillPageSlugs: options.skillPageSlugs
-      ? new Set(options.skillPageSlugs)
-      : null,
-  };
+  // The course names its sources as TypeScript skill files, but each language
+  // publishes its own skill pages, so the only safe link target is a slug this
+  // language actually publishes. Taking that inventory as an argument keeps one
+  // source of truth; deriving it here would duplicate skill-mirrors.mjs.
+  const skillPageSlugs = publishedSkillSlugs(options.skillPageSlugs, language);
+  const localizedCourse = localizeAcademyCourse(
+    course,
+    language,
+    skillPageSlugs
+  );
   const manifest = academyManifest(localizedCourse);
   const pages = [
     descriptor(`${language.id}/academy/_index.md`, language, {
@@ -480,10 +502,11 @@ function descriptor(
   };
 }
 
-function localizeAcademyCourse(course, language) {
+function localizeAcademyCourse(course, language, skillPageSlugs) {
   return {
     ...course,
     language: language.id,
+    skillPageSlugs,
     languageLabel: language.label,
     fence: language.fence,
     install: normalizeSnippet(language.install),
@@ -789,7 +812,7 @@ function renderTopic(course, manifest, unit, topic) {
         </section>
         <section class="academy-sources" aria-labelledby="sources-title">
           <span class="academy-label">Keep exploring</span><h2 id="sources-title">Source-backed follow-up</h2>
-          <ul>${unit.sourceRefs.map((source) => renderSourceLink(source, course)).join('')}${unit.examplePaths.length ? `<li><a href="${githubSource(unit.examplePaths[0])}">Source on GitHub</a></li>` : ''}</ul>
+          <ul>${unit.sourceRefs.map((source) => renderSourceLink(source, course.language, course.skillPageSlugs)).join('')}${unit.examplePaths.length ? `<li><a href="${githubSource(unit.examplePaths[0])}">Source on GitHub</a></li>` : ''}</ul>
         </section>
         <nav class="academy-lesson-nav" aria-label="Course lessons">
           ${previous ? `<a href="${topicHref(previous, course.language)}">← Previous</a>` : '<span></span>'}
@@ -912,30 +935,30 @@ function githubSource(source) {
   return `https://github.com/ax-llm/ax/blob/main/${source}`;
 }
 
-function renderSourceLink(source, course) {
-  const languageId = course.language;
+function renderSourceLink(source, languageId, skillPageSlugs) {
   const basename = path.basename(source, path.extname(source));
-  const skill = basename.startsWith('ax-') ? basename : null;
   const label = sourceLabels[basename] ?? humanizeSource(basename);
   const publicPath = sourcePublicPaths[source];
-  // Only TypeScript skill pages keep the bare `ax-*` slug; every other language
-  // publishes `ax-<language>-*`.
-  const skillSlug =
-    skill && languageId !== 'typescript'
-      ? skill.replace(/^ax-/, `ax-${languageId}-`)
-      : skill;
-  // Not every language ships every skill. Without a published page, link the
-  // source file the lesson is built from instead of a page that does not exist.
-  const skillPagePublished =
-    skillSlug &&
-    (course.skillPageSlugs ? course.skillPageSlugs.has(skillSlug) : true);
-  if (publicPath) {
-    return `<li><a href="/${languageId}/${publicPath}/">${escapeHtml(label)}</a></li>`;
-  }
-  if (skillPagePublished) {
-    return `<li><a href="/${languageId}/skills/${skillSlug}/">${escapeHtml(label)}</a></li>`;
-  }
-  return `<li><a href="${githubSource(source)}">${escapeHtml(label)} (source on GitHub)</a></li>`;
+  const href =
+    (publicPath ? `/${languageId}/${publicPath}/` : undefined) ??
+    skillPageHref(basename, languageId, skillPageSlugs) ??
+    githubSource(source);
+  return `<li><a href="${href}">${escapeHtml(label)}</a></li>`;
+}
+
+// `src/ax/skills/ax-agent-rlm.md` is published as `ax-agent-rlm` by
+// TypeScript and as `ax-<language>-agent-rlm` by a generated package, and some
+// subsystems have no skill in some languages at all. Only a slug the language
+// publishes becomes a link; anything else keeps the GitHub source reference,
+// which is a real document rather than a guessed route.
+function skillPageHref(basename, languageId, skillPageSlugs) {
+  if (!basename.startsWith('ax-') || !skillPageSlugs) return undefined;
+  const candidates = [
+    `ax-${languageId}-${basename.slice('ax-'.length)}`,
+    basename,
+  ];
+  const slug = candidates.find((candidate) => skillPageSlugs.has(candidate));
+  return slug ? `/${languageId}/skills/${slug}/` : undefined;
 }
 
 const sourceLabels = {

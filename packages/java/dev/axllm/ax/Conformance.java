@@ -2063,10 +2063,16 @@ public final class Conformance {
       assertEqual(built.toString(), fixture.get("expected_rendered"), "flow mermaid builder render");
       return;
     }
+    if (fixture.get("operation") != null && !"roundtrip".equals(operation)) {
+      throw new FixtureError("unknown flow mermaid operation " + operation);
+    }
     AxFlow first = new AxFlow(String.valueOf(fixture.get("document")), bindings);
-    String expected = String.valueOf(fixture.getOrDefault("expected_rerendered", fixture.get("expected_rendered")));
-    assertEqual(first.toString(), expected, "flow mermaid render");
+    if (fixture.containsKey("expected_direction")) {
+      assertEqual(Core.asMap(Core._flow_mermaid_parse(fixture.get("document"))).get("direction"), fixture.get("expected_direction"), "flow mermaid source direction");
+    }
+    assertEqual(first.toString(), fixture.get("expected_rendered"), "flow mermaid render");
     AxFlow second = new AxFlow(first.toString(), bindings);
+    String expected = String.valueOf(fixture.getOrDefault("expected_rerendered", fixture.get("expected_rendered")));
     assertEqual(second.toString(), expected, "flow mermaid canonical roundtrip");
   }
 

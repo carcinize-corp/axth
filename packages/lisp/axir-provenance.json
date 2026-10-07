@@ -1,0 +1,11 @@
+{
+  "target": "lisp",
+  "enforced": true,
+  "emitted_functions": 1063,
+  "files": {
+    "src/core.lisp": {
+      "emitted_lines": 47988,
+      "total_lines": 49497
+    }
+  }
+}

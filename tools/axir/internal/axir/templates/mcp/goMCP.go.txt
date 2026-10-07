@@ -131,6 +131,19 @@ type AxMCPToolCallOutcome struct {
 
 type AxMCPElicitationHandler func(params, context map[string]Value) (map[string]Value, error)
 
+// AxMCPSamplingHandler answers an inbound sampling/createMessage. A host
+// that installs one is what makes the sampling capability honest; a bare
+// "sampling": true option is not a handler and Init rejects it.
+type AxMCPSamplingHandler func(params, context map[string]Value) (map[string]Value, error)
+
+func (c *AxMCPClient) samplingHandler() (AxMCPSamplingHandler, bool) {
+	switch handler:=c.options["sampling"].(type){
+	case AxMCPSamplingHandler:return handler,true
+	case func(map[string]Value,map[string]Value)(map[string]Value,error):return AxMCPSamplingHandler(handler),true
+	default:return nil,false
+	}
+}
+
 func (c *AxMCPClient) elicitationHandler() (AxMCPElicitationHandler, bool) {
 	switch handler:=c.options["elicitation"].(type){
 	case AxMCPElicitationHandler:return handler,true
@@ -154,7 +167,10 @@ func NewAxMCPClient(transport AxMCPTransport, options map[string]Value) *AxMCPCl
 
 func (c *AxMCPClient) Init() error {
 	if c.initialized { return nil }
-	if coreTruthy(coreGet(c.options,"sampling",nil)) { return fmt.Errorf("MCP sampling is not supported by the generated Go client") }
+	// A truthy flag is not a handler. Advertising sampling without one would
+	// make the client lie about what it can answer, so this stays a
+	// rejection; only a callable handler enables sampling.
+	if _,callable:=c.samplingHandler();!callable&&coreTruthy(coreGet(c.options,"sampling",nil)) { return fmt.Errorf("MCP sampling is not supported without a host handler function") }
 	if err := c.transport.Connect(); err != nil { return err }
 	configured:=display(coreGet(c.options,"era","auto"));key:=c.transport.EraCacheKey();cached:="";axMCPEraCache.Lock();cached=axMCPEraCache.values[key];axMCPEraCache.Unlock();stored:="";switch store:=c.options["eraStore"].(type){case map[string]string:stored=store[key];case map[string]Value:stored=display(store[key])}
 	resolution:=asMap(mustCore(mcp_resolve_known_era(configured,c.transport.EraHint(),cached,stored)));resolved:=display(coreGet(resolution,"era","modern"))
@@ -682,7 +698,7 @@ func (c *AxMCPClient) requestWithHeaders(method string, params map[string]Value,
 func (c *AxMCPClient) clientCapabilities() map[string]Value {
 	out := map[string]Value{}
 	for key, value := range asMap(coreGet(c.options, "capabilities", Object())) { out[key] = value }
-	tasksExtension:=true;if value,ok:=c.options["tasksExtension"];ok{tasksExtension=coreTruthy(value)};_,hasElicitation:=c.elicitationHandler();derived:=asMap(mustCore(mcp_client_capabilities(coreGet(c.options,"roots",nil)!=nil,false,hasElicitation,c.era,tasksExtension)));for key,value:=range derived{if _,ok:=out[key];!ok{out[key]=value}};delete(out,"sampling");if !hasElicitation{delete(out,"elicitation")}
+	tasksExtension:=true;if value,ok:=c.options["tasksExtension"];ok{tasksExtension=coreTruthy(value)};_,hasElicitation:=c.elicitationHandler();_,hasSampling:=c.samplingHandler();derived:=asMap(mustCore(mcp_client_capabilities(coreGet(c.options,"roots",nil)!=nil,hasSampling,hasElicitation,c.era,tasksExtension)));for key,value:=range derived{if _,ok:=out[key];!ok{out[key]=value}};if !hasSampling{delete(out,"sampling")};if !hasElicitation{delete(out,"elicitation")}
 	return out
 }
 
@@ -705,9 +721,212 @@ func (c *AxMCPClient) handleInboundMessage(message map[string]Value) {
 }
 
 func(c *AxMCPClient)handleServerRequest(message map[string]Value)map[string]Value{
-	handler,hasHandler:=c.elicitationHandler();plan:=asMap(mustCore(mcp_server_request_plan(message,coreGet(c.options,"roots",nil),hasHandler)));if display(plan["action"])=="respond"{return cloneMCPMap(asMap(plan["response"]))}
+	// mcp_server_request_plan_full adds the has_sampling branch; the
+	// three-argument mcp_server_request_plan is preserved in Core and keeps
+	// answering -32601 for sampling, which the fixture asserts separately.
+	elicitation,hasElicitation:=c.elicitationHandler();sampling,hasSampling:=c.samplingHandler()
+	plan:=asMap(mustCore(mcp_server_request_plan_full(message,coreGet(c.options,"roots",nil),hasElicitation,hasSampling)))
+	action:=display(plan["action"])
+	var handler func(params,context map[string]Value)(map[string]Value,error)
+	switch action{
+	case "elicitation":if hasElicitation{handler=elicitation}
+	case "sampling":if hasSampling{handler=sampling}
+	}
+	if handler==nil{return cloneMCPMap(asMap(plan["response"]))}
 	result,err:=handler(asMap(coreGet(plan,"params",Object())),map[string]Value{"client":c,"namespace":c.Namespace()});if err!=nil{return map[string]Value{"jsonrpc":"2.0","id":coreGet(plan,"id",nil),"error":map[string]Value{"code":-32603,"message":err.Error()}}};return map[string]Value{"jsonrpc":"2.0","id":coreGet(plan,"id",nil),"result":result}
 }
+
+// axMCPAppDisplayModes are the display modes the MCP Apps protocol defines.
+var axMCPAppDisplayModes = map[string]bool{"inline":true,"fullscreen":true,"pip":true}
+
+// AxMCPAppBridge is the host side of the MCP Apps protocol: one sandboxed
+// frame joined to one MCP client.
+//
+// Every policy decision belongs to Core, in ir/axcore/mcp.axir:
+// mcp_app_tool_meta and mcp_app_tool_visible_to for the ui resource and
+// visibility, mcp_app_resource_plan for the scheme, MIME type and HTML
+// document, and mcp_app_view_message_plan for the whole dispatch including
+// the initialization gate, reserved sandbox methods and display-mode
+// validation. What is native here is only effect: reading the resource,
+// decoding a blob, calling the host's callbacks, tracking the initialized
+// flag and the outbound id, and shaping the JSON-RPC envelope Core named.
+//
+// Two safety properties are easy to lose and so are stated: a frame cannot
+// act before it has initialized, and an absent host callback is a closed
+// door rather than a default this bridge invents.
+type AxMCPAppBridge struct {
+	client      *AxMCPClient
+	tool        map[string]Value
+	options     map[string]Value
+	initialized bool
+	nextID      int
+}
+
+// NewAxMCPAppBridge builds a bridge for one tool. tool is a tool name or a
+// tool object from the client's catalog. Recognised option callbacks are
+// sendToView, hostCapabilities, hostContext, authorize, openLink,
+// sendMessage, updateModelContext, requestDisplayMode, log and sizeChanged.
+func NewAxMCPAppBridge(client *AxMCPClient, tool Value, options map[string]Value) (*AxMCPAppBridge, error) {
+	resolved,_ := tool.(map[string]Value)
+	if resolved==nil {
+		name:=display(tool)
+		for _,candidate:=range client.Tools(){if display(coreGet(candidate,"name",""))==name{resolved=candidate;break}}
+		if resolved==nil{return nil,AxError{Category:"mcp",Message:"MCP App tool not found: "+name}}
+	}
+	copied:=map[string]Value{};for key,value:=range options{copied[key]=value}
+	return &AxMCPAppBridge{client:client,tool:resolved,options:copied,nextID:1},nil
+}
+
+func (b *AxMCPAppBridge) Initialized() bool { return b.initialized }
+
+func (b *AxMCPAppBridge) callback(name string) func(Value) {
+	switch handler:=b.options[name].(type){
+	case func(Value):return handler
+	case func(map[string]Value):return func(value Value){handler(asMap(value))}
+	default:return nil
+	}
+}
+
+// LoadResource reads, validates and returns this App's ui:// resource.
+// A resource whose URI is not ui://, whose MIME type is not the App type,
+// whose body is not an HTML document, or whose CSP names an unsafe source,
+// is refused here rather than handed to a frame.
+func (b *AxMCPAppBridge) toolCatalog() []Value {
+	out:=make([]Value,0,len(b.client.Tools()))
+	for _,tool:=range b.client.Tools(){out=append(out,tool)}
+	return out
+}
+
+func (b *AxMCPAppBridge) LoadResource() (map[string]Value, error) {
+	name:=display(coreGet(b.tool,"name",""))
+	uri:=display(coreGet(asMap(mustCore(mcp_app_tool_meta(b.tool))),"resourceUri",""))
+	if !strings.HasPrefix(uri,"ui://"){return nil,AxError{Category:"mcp",Message:"MCP App tool "+name+" has no valid ui:// resource"}}
+	response,err:=b.client.ReadResource(uri);if err!=nil{return nil,err}
+	var item map[string]Value
+	for _,raw:=range asSlice(coreGet(response,"contents",Array())){candidate:=asMap(raw);if display(coreGet(candidate,"uri",""))==uri{item=candidate;break}}
+	if item==nil{return nil,AxError{Category:"mcp",Message:"MCP App resource "+uri+" was not returned"}}
+	var html string
+	if text,ok:=item["text"].(string);ok{
+		html=text
+	} else {
+		decoded,decodeErr:=base64.StdEncoding.DecodeString(display(coreGet(item,"blob","")))
+		if decodeErr!=nil{return nil,AxError{Category:"mcp",Message:"MCP App resource blob is not valid base64 HTML"}}
+		html=string(decoded)
+	}
+	meta:=asMap(coreGet(asMap(coreGet(item,"_meta",Object())),"ui",Object()))
+	plan:=asMap(mustCore(mcp_app_resource_plan(name,uri,coreGet(item,"mimeType","<missing>"),html,meta)))
+	if !coreTruthy(coreGet(plan,"ok",false)){return nil,AxError{Category:"mcp",Message:display(coreGet(plan,"message",""))}}
+	return asMap(plan["resource"]),nil
+}
+
+// HandleViewMessage dispatches one message from the frame, returning the
+// response to send back or nil for a notification. A host callback that
+// fails becomes a JSON-RPC error when the message carried an id, and
+// propagates when it did not, so a notification failure is never swallowed.
+func (b *AxMCPAppBridge) HandleViewMessage(message map[string]Value) (map[string]Value, error) {
+	_,isRequest:=message["id"]
+	response,err:=b.dispatchViewMessage(message)
+	if err!=nil&&isRequest{
+		return map[string]Value{"jsonrpc":"2.0","id":coreGet(message,"id",nil),"error":map[string]Value{"code":-32000,"message":errorMessage(err)}},nil
+	}
+	return response,err
+}
+
+func (b *AxMCPAppBridge) dispatchViewMessage(message map[string]Value) (map[string]Value, error) {
+	context:=map[string]Value{
+		// Core's value model reads a JSON array, not []map[string]Value; a
+		// typed slice here makes Core see no tools and refuse every call.
+		"namespace":b.client.Namespace(),"tool":coreGet(b.tool,"name",""),"tools":b.toolCatalog(),
+		"hostCapabilities":b.options["hostCapabilities"],"hostContext":b.options["hostContext"],
+		"canOpenLink":b.callback("openLink")!=nil,
+		"canSendMessage":b.callback("sendMessage")!=nil,
+		"canUpdateModelContext":b.callback("updateModelContext")!=nil,
+	}
+	plan:=asMap(mustCore(mcp_app_view_message_plan(message,b.initialized,context)))
+	action:=display(coreGet(plan,"action",""))
+	switch action{
+	case "error":
+		return nil,AxError{Category:"mcp",Message:display(coreGet(plan,"reason",""))}
+	case "initialized":
+		b.initialized=true;return nil,nil
+	case "ignore":
+		return nil,nil
+	case "log":
+		if callback:=b.callback("log");callback!=nil{callback(coreGet(plan,"params",nil))}
+		return nil,nil
+	case "size-changed":
+		if callback:=b.callback("sizeChanged");callback!=nil{callback(coreGet(plan,"size",nil))}
+		return nil,nil
+	}
+	var result Value = Object()
+	if action=="respond"{
+		result=coreGet(plan,"result",Object())
+	} else {
+		if err:=b.authorize(action,message);err!=nil{return nil,err}
+		switch action{
+		case "call-tool":
+			called,err:=b.client.CallTool(display(coreGet(plan,"name","")),asMap(coreGet(plan,"arguments",Object())));if err!=nil{return nil,err};result=called
+		case "read-resource":
+			read,err:=b.client.ReadResource(display(coreGet(plan,"uri","")));if err!=nil{return nil,err};result=read
+		case "open-link":
+			b.callback("openLink")(coreGet(plan,"url",""))
+		case "send-message":
+			b.callback("sendMessage")(coreGet(plan,"params",Object()))
+		case "update-model-context":
+			// Core stamped untrusted and the source; pass it through unchanged.
+			b.callback("updateModelContext")(coreGet(plan,"update",Object()))
+		case "request-display-mode":
+			mode:="inline"
+			if handler,ok:=b.options["requestDisplayMode"].(func(Value)Value);ok{mode=display(handler(coreGet(plan,"mode","")))}
+			// Core validated the mode the frame asked for; this validates the
+			// mode the host granted. A host that answers with a mode the
+			// protocol does not define is a host bug, and the frame must not
+			// be told it succeeded.
+			if !axMCPAppDisplayModes[mode]{return nil,AxError{Category:"mcp",Message:"Invalid MCP App display mode granted by host: "+mode}}
+			result=map[string]Value{"mode":mode}
+		default:
+			return nil,AxError{Category:"mcp",Message:"Unknown MCP App action: "+action}
+		}
+	}
+	return map[string]Value{"jsonrpc":"2.0","id":coreGet(message,"id",nil),"result":result},nil
+}
+
+func (b *AxMCPAppBridge) authorize(action string, message map[string]Value) error {
+	handler,ok:=b.options["authorize"].(func(Value)Value)
+	if !ok{return nil}
+	decision:=handler(map[string]Value{"method":action,"params":coreGet(message,"params",nil),
+		"namespace":b.client.Namespace(),"tool":coreGet(b.tool,"name","")})
+	if decision==Value(false){return AxError{Category:"mcp",Message:"MCP App request denied: "+action}}
+	return nil
+}
+
+func (b *AxMCPAppBridge) notify(method string, params Value) error {
+	if !b.initialized{return AxError{Category:"mcp",Message:"MCP App is not initialized"}}
+	if callback:=b.callback("sendToView");callback!=nil{callback(map[string]Value{"jsonrpc":"2.0","method":method,"params":params})}
+	return nil
+}
+
+func (b *AxMCPAppBridge) NotifyToolInput(arguments Value) error {return b.notify("ui/notifications/tool-input",map[string]Value{"arguments":arguments})}
+func (b *AxMCPAppBridge) NotifyToolInputPartial(arguments Value) error {return b.notify("ui/notifications/tool-input-partial",map[string]Value{"arguments":arguments})}
+func (b *AxMCPAppBridge) NotifyToolResult(result Value) error {return b.notify("ui/notifications/tool-result",result)}
+func (b *AxMCPAppBridge) NotifyToolCancelled(reason Value) error {return b.notify("ui/notifications/tool-cancelled",map[string]Value{"reason":reason})}
+func (b *AxMCPAppBridge) NotifyHostContextChanged(context Value) error {return b.notify("ui/notifications/host-context-changed",context)}
+
+// Teardown dismisses the frame and requires a fresh initialization, so a
+// torn-down App cannot keep pushing notifications.
+func (b *AxMCPAppBridge) Teardown(reason Value) {
+	id:=b.nextID;b.nextID++
+	if callback:=b.callback("sendToView");callback!=nil{
+		callback(map[string]Value{"jsonrpc":"2.0","id":id,"method":"ui/resource-teardown","params":map[string]Value{"reason":reason}})
+	}
+	b.initialized=false
+}
+
+// bridge2Response runs one frame message and returns the response, so a
+// caller that only wants the response does not have to spell the tuple out.
+func bridge2Response(bridge *AxMCPAppBridge,message map[string]Value)(map[string]Value,error){return bridge.HandleViewMessage(message)}
+
+func errorMessage(err error) string { if err==nil{return ""};return err.Error() }
 
 type AxMCPResourceSubscriptionPolicy struct{Mode string;URIs []string;Select func(map[string]Value,AxMCPCatalogSnapshot)bool}
 func AxMCPSubscribeNone()AxMCPResourceSubscriptionPolicy{return AxMCPResourceSubscriptionPolicy{Mode:"none"}}
@@ -1385,6 +1604,8 @@ func runMCPConformanceFixture(fixture map[string]Value) {
 	}
 	transport := NewAxMCPScriptedTransport(asSlice(coreGet(fixture, "responses", coreGet(fixture, "transport_responses", Array()))))
 	clientOptions:=asMap(coreGet(fixture,"client_options",Object()));elicitationParams:=map[string]Value{};elicitationContext:=map[string]Value{};elicitationCalls:=0
+	samplingCalls:=0;samplingParams:=map[string]Value{};samplingContext:=map[string]Value{}
+	if op=="server_requests_sampling"{clientOptions["sampling"]=AxMCPSamplingHandler(func(params,context map[string]Value)(map[string]Value,error){samplingCalls++;samplingParams=cloneMCPMap(params);samplingContext=context;return asMap(coreGet(fixture,"sampling_result",Object())),nil})}
 	if op=="mrtr_elicitation"||op=="tasks_v2_input_required"||op=="server_requests_legacy"{clientOptions["elicitation"]=AxMCPElicitationHandler(func(params,context map[string]Value)(map[string]Value,error){if coreTruthy(coreGet(params,"fail",false)){return nil,fmt.Errorf("fixture handler failed")};elicitationCalls++;elicitationParams=cloneMCPMap(params);elicitationContext=context;return asMap(coreGet(fixture,"elicitation_result",Object())),nil})}
 	client := NewAxMCPClient(transport, clientOptions)
 	if err := client.Init(); err != nil { panic(err) }
@@ -1404,10 +1625,197 @@ func runMCPConformanceFixture(fixture map[string]Value) {
 		result,err:=client.CallTool("slow",map[string]Value{});if err!=nil{panic(err)};assertSubset(result,coreGet(fixture,"expected_call_result",Object()),"task call result");if err=client.ProvideTaskInput("task-1",map[string]Value{});err!=nil{panic(err)};if _,err=client.CancelTask("task-1");err!=nil{panic(err)};if _,err=client.ListTasks("");err==nil||!strings.Contains(err.Error(),display(coreGet(fixture,"expected_list_error",""))){panic("missing modern tasks/list rejection")};if _,err=client.GetTaskResult("task-1");err==nil||!strings.Contains(err.Error(),display(coreGet(fixture,"expected_result_error",""))){panic("missing modern tasks/result rejection")};methods:=[]Value{};for _,request:=range transport.Requests{methods=append(methods,display(coreGet(request,"method","")))};assertEqual(methods,coreGet(fixture,"expected_methods",Array()),"task request methods")
 	case "tasks_v2_input_required":
 		result,err:=client.CallTool("slow",map[string]Value{});if err!=nil{panic(err)};assertSubset(result,coreGet(fixture,"expected_result",Object()),"task input-required result");if elicitationCalls!=1{panic("task elicitation handler count mismatch")};assertSubset(elicitationParams,coreGet(fixture,"expected_elicitation_params",Object()),"task elicitation params");assertSubset(elicitationContext,coreGet(fixture,"expected_context",Object()),"task elicitation context");var update map[string]Value;methods:=[]Value{};for _,request:=range transport.Requests{methods=append(methods,display(coreGet(request,"method","")));if display(coreGet(request,"method",""))=="tasks/update"{update=request}};assertSubset(coreGet(update,"params",Object()),coreGet(fixture,"expected_update_params",Object()),"task update params");assertEqual(methods,coreGet(fixture,"expected_methods",Array()),"task input-required methods")
+	case "app_bridge":
+		sent:=[]Value{};links:=[]Value{};updates:=[]Value{};sizes:=[]Value{}
+		appendTo:=func(target *[]Value)func(Value){return func(value Value){*target=append(*target,value)}}
+		bridge,err:=NewAxMCPAppBridge(client,coreGet(fixture,"tool",""),map[string]Value{
+			"sendToView":appendTo(&sent),"openLink":appendTo(&links),
+			"updateModelContext":appendTo(&updates),"sizeChanged":appendTo(&sizes),
+			"requestDisplayMode":func(Value)Value{return "inline"},
+		});if err!=nil{panic(err)}
+		tools:=map[string]map[string]Value{};for _,tool:=range client.Tools(){tools[display(coreGet(tool,"name",""))]=tool}
+		// Core owns the policy; these assert the generated helpers directly.
+		assertEqual(mustCore(mcp_app_tool_meta(tools[display(coreGet(fixture,"tool",""))])),coreGet(fixture,"expected_tool_meta",Object()),"App tool meta")
+		for _,raw:=range asSlice(coreGet(fixture,"visibility_cases",Array())){c:=asMap(raw)
+			assertEqual(mustCore(mcp_app_tool_visible_to(tools[display(coreGet(c,"tool",""))],coreGet(c,"principal",""))),coreGet(c,"expected",false),"App tool visibility "+display(coreGet(c,"tool","")))}
+		transport.Responses=append(transport.Responses,coreGet(fixture,"resource_read",Object()))
+		resource,err:=bridge.LoadResource();if err!=nil{panic(err)}
+		assertSubset(resource,coreGet(fixture,"expected_resource",Object()),"App resource")
+		// A fresh client per resource case, so one bad resource cannot
+		// contaminate the next.
+		loadContent:=func(content Value)(map[string]Value,error){
+			responses:=append(append([]Value{},asSlice(coreGet(fixture,"responses",Array()))...),map[string]Value{"method":"resources/read","result":map[string]Value{"contents":[]Value{content}}})
+			resourceClient:=NewAxMCPClient(NewAxMCPScriptedTransport(responses),asMap(coreGet(fixture,"client_options",Object())))
+			if initErr:=resourceClient.Init();initErr!=nil{return nil,initErr}
+			resourceBridge,bridgeErr:=NewAxMCPAppBridge(resourceClient,coreGet(fixture,"tool",""),nil);if bridgeErr!=nil{return nil,bridgeErr}
+			return resourceBridge.LoadResource()
+		}
+		for _,raw:=range asSlice(coreGet(fixture,"invalid_resources",Array())){c:=asMap(raw)
+			if _,loadErr:=loadContent(coreGet(c,"content",Object()));loadErr==nil{
+				panic("invalid App resource accepted: "+display(coreGet(c,"note","")))
+			} else if !strings.Contains(loadErr.Error(),display(coreGet(c,"expected_error_contains",""))){
+				panic("invalid App resource: "+loadErr.Error())
+			}}
+		blob:=asMap(coreGet(fixture,"blob_resource",Object()))
+		blobResource,err:=loadContent(coreGet(blob,"content",Object()));if err!=nil{panic(err)}
+		assertEqual(coreGet(blobResource,"html",""),coreGet(blob,"expected_html",""),"App blob resource HTML")
+		// A frame cannot act before it has initialized.
+		for _,raw:=range asSlice(coreGet(fixture,"pre_initialize_cases",Array())){c:=asMap(raw)
+			if expected,ok:=c["expected_error_contains"];ok{
+				if _,preErr:=bridge.HandleViewMessage(asMap(coreGet(c,"message",Object())));preErr==nil{
+					panic("pre-initialize notification accepted")
+				} else if !strings.Contains(preErr.Error(),display(expected)){panic("pre-initialize: "+preErr.Error())}
+			} else {
+				response,preErr:=bridge.HandleViewMessage(asMap(coreGet(c,"message",Object())));if preErr!=nil{panic(preErr)}
+				assertEqual(response,coreGet(c,"expected_response",Object()),"pre-initialize response")
+			}}
+		initializeResponse,err:=bridge.HandleViewMessage(asMap(coreGet(fixture,"initialize_message",Object())));if err!=nil{panic(err)}
+		assertEqual(initializeResponse,coreGet(fixture,"expected_initialize_response",Object()),"App initialize response")
+		if _,err=bridge.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","method":"ui/notifications/initialized"});err!=nil{panic(err)}
+		for _,raw:=range asSlice(coreGet(fixture,"request_cases",Array())){c:=asMap(raw)
+			if response,ok:=c["response"];ok{transport.Responses=append(transport.Responses,response)}
+			requestStart:=len(transport.Requests);linkStart:=len(links);updateStart:=len(updates)
+			response,caseErr:=bridge.HandleViewMessage(asMap(coreGet(c,"message",Object())));if caseErr!=nil{panic(caseErr)}
+			assertEqual(response,coreGet(c,"expected_response",Object()),"App request: "+display(coreGet(c,"note","")))
+			calls:=[]map[string]Value{};for _,request:=range transport.Requests[requestStart:]{if display(coreGet(request,"method",""))=="tools/call"{calls=append(calls,request)}}
+			if expected,ok:=c["expected_tool_request"];ok{
+				if len(calls)!=1{panic("App tool request count: "+display(coreGet(c,"note","")))}
+				assertEqual(coreGet(calls[0],"params",Object()),expected,"App tool request params")}
+			if expected,ok:=c["expected_tool_requests"].(float64);ok{
+				if len(calls)!=int(expected){panic("App tool request count: "+display(coreGet(c,"note","")))}}
+			if expected,ok:=c["expected_open_links"].(float64);ok{
+				if len(links)-linkStart!=int(expected){panic("App open-link count: "+display(coreGet(c,"note","")))}}
+			if expected,ok:=c["expected_opened_url"];ok{
+				assertEqual(links[len(links)-1],expected,"App opened URL")}
+			if expected,ok:=c["expected_model_context_update"];ok{
+				if len(updates)-updateStart!=1{panic("App model-context update count")}
+				assertEqual(updates[len(updates)-1],expected,"App model-context update")}}
+		// An absent callback is a closed door, not a default.
+		disabled,err:=NewAxMCPAppBridge(client,coreGet(fixture,"tool",""),nil);if err!=nil{panic(err)}
+		if _,err=disabled.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","method":"ui/notifications/initialized"});err!=nil{panic(err)}
+		for _,raw:=range asSlice(coreGet(fixture,"disabled_cases",Array())){c:=asMap(raw)
+			response,caseErr:=disabled.HandleViewMessage(asMap(coreGet(c,"message",Object())));if caseErr!=nil{panic(caseErr)}
+			assertEqual(response,coreGet(c,"expected_response",Object()),"App disabled: "+display(coreGet(c,"note","")))}
+		reserved:=asMap(coreGet(fixture,"reserved_notification",Object()))
+		if _,reservedErr:=bridge.HandleViewMessage(asMap(coreGet(reserved,"message",Object())));reservedErr==nil{
+			panic("reserved sandbox notification accepted")
+		} else if !strings.Contains(reservedErr.Error(),display(coreGet(reserved,"expected_error_contains",""))){panic("reserved notification: "+reservedErr.Error())}
+		sizeCase:=asMap(coreGet(fixture,"size_notification",Object()))
+		if _,err=bridge.HandleViewMessage(asMap(coreGet(sizeCase,"message",Object())));err!=nil{panic(err)}
+		if len(sizes)!=1{panic("App size notification count")}
+		assertEqual(sizes[0],coreGet(sizeCase,"expected_size",Object()),"App size notification")
+		sizes=sizes[:0]
+		invalidSize:=asMap(coreGet(fixture,"invalid_size_notification",Object()))
+		if _,err=bridge.HandleViewMessage(asMap(coreGet(invalidSize,"message",Object())));err!=nil{panic(err)}
+		expectedSizes:=0
+		if raw,ok:=coreGet(invalidSize,"expected_sizes",nil).(float64);ok{expectedSizes=int(raw)}
+		if len(sizes)!=expectedSizes{panic(fmt.Sprintf("invalid App size notification delivered %d size(s)",len(sizes)))}
+		// A denied request must not reach the client at all.
+		denied,err:=NewAxMCPAppBridge(client,coreGet(fixture,"tool",""),map[string]Value{"authorize":func(Value)Value{return false}});if err!=nil{panic(err)}
+		if _,err=denied.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","method":"ui/notifications/initialized"});err!=nil{panic(err)}
+		deniedCase:=asMap(coreGet(fixture,"authorize_denied",Object()))
+		requestStart:=len(transport.Requests)
+		deniedResponse,err:=bridge2Response(denied,asMap(coreGet(deniedCase,"message",Object())));if err!=nil{panic(err)}
+		assertEqual(deniedResponse,coreGet(deniedCase,"expected_response",Object()),"App authorize denied")
+		expectedRequests:=0
+		if raw,ok:=coreGet(deniedCase,"expected_tool_requests",nil).(float64);ok{expectedRequests=int(raw)}
+		if len(transport.Requests)-requestStart!=expectedRequests{panic("denied App request reached the client")}
+		if err=bridge.NotifyToolInput(map[string]Value{"item":"sku-2"});err!=nil{panic(err)}
+		if err=bridge.NotifyToolResult(map[string]Value{"structuredContent":map[string]Value{"picked":"sku-2"}});err!=nil{panic(err)}
+		assertEqual(sent,coreGet(fixture,"expected_notifications",Array()),"App notifications")
+		bridge.Teardown(coreGet(fixture,"teardown_reason",""))
+		assertSubset(asMap(sent[len(sent)-1]),coreGet(fixture,"expected_teardown",Object()),"App teardown")
+		assertEqual(coreGet(asMap(sent[len(sent)-1]),"id",nil),float64(1),"App teardown id")
+		// After teardown the frame is uninitialized again.
+		if err=bridge.NotifyToolInput(Object());err==nil{
+			panic("App still sends notifications after teardown")
+		} else if !strings.Contains(err.Error(),"not initialized"){panic("post-teardown: "+err.Error())}
+
+		// Native regressions the fixture does not reach. Each one is a host
+		// bug or a protocol shape the fixture has no case for, and each
+		// failed before this was written.
+		//
+		// 1. Core validates the mode the frame asks for; nothing validated
+		//    the mode the host grants. A host answering "sidebar" must
+		//    become an error response, not a successful one.
+		badMode,err:=NewAxMCPAppBridge(client,coreGet(fixture,"tool",""),map[string]Value{
+			"requestDisplayMode":func(Value)Value{return "sidebar"},
+		});if err!=nil{panic(err)}
+		if _,err=badMode.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","method":"ui/notifications/initialized"});err!=nil{panic(err)}
+		badModeResponse,err:=badMode.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","id":"mode-native","method":"ui/request-display-mode","params":map[string]Value{"mode":"inline"}})
+		if err!=nil{panic(err)}
+		if _,ok:=badModeResponse["result"];ok{panic("a host-granted invalid display mode was reported as success")}
+		if !strings.Contains(display(coreGet(asMap(coreGet(badModeResponse,"error",Object())),"message","")),"display mode"){
+			panic("host-granted invalid display mode error is not named: "+display(badModeResponse["error"]))}
+
+		// 2. A JSON-RPC id may legitimately be null. The error envelope must
+		//    carry it rather than failing to build.
+		nullID,err:=NewAxMCPAppBridge(client,coreGet(fixture,"tool",""),map[string]Value{
+			"requestDisplayMode":func(Value)Value{return "sidebar"},
+		});if err!=nil{panic(err)}
+		if _,err=nullID.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","method":"ui/notifications/initialized"});err!=nil{panic(err)}
+		nullIDResponse,err:=nullID.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","id":nil,"method":"ui/request-display-mode","params":map[string]Value{"mode":"inline"}})
+		if err!=nil{panic(err)}
+		if _,ok:=nullIDResponse["id"];!ok{panic("error envelope dropped a null JSON-RPC id")}
+		if nullIDResponse["id"]!=nil{panic("error envelope changed a null JSON-RPC id")}
+		if _,ok:=nullIDResponse["error"];!ok{panic("a null-id request produced no error envelope")}
+
+		// 3. A notification has no id, so a failing host callback has nowhere
+		//    to be reported. It must propagate rather than be swallowed.
+		failing,err:=NewAxMCPAppBridge(client,coreGet(fixture,"tool",""),map[string]Value{
+			"sendToView":func(Value){panic(AxError{Category:"fixture",Message:"host sendToView failed"})},
+		});if err!=nil{panic(err)}
+		if _,err=failing.HandleViewMessage(map[string]Value{"jsonrpc":"2.0","method":"ui/notifications/initialized"});err!=nil{panic(err)}
+		func(){
+			defer func(){if recovered:=recover();recovered==nil{panic("a failing notification callback was swallowed")}}()
+			_=failing.NotifyToolInput(Object())
+		}()
+		// 4. Teardown lifecycle, matching the Lisp and Python references: a
+		//    sendToView that fails during teardown propagates and leaves the
+		//    frame initialized, because the frame was never told to go away.
+		if !failing.Initialized(){panic("the frame should still be initialized before teardown")}
+		func(){
+			defer func(){
+				if recovered:=recover();recovered==nil{panic("a failing teardown callback was swallowed")}
+				if !failing.Initialized(){panic("teardown cleared initialized even though the frame was never told")}
+			}()
+			failing.Teardown("native")
+		}()
+		return
+	case "server_requests_sampling":
+		// Every inbound request the fixture lists, answered in order.
+		for _,request:=range asSlice(coreGet(fixture,"server_requests",Array())){transport.Emit(cloneMCPMap(asMap(request)))}
+		expectedResponses:=asSlice(coreGet(fixture,"expected_responses",Array()))
+		if len(transport.SentResponses)<len(expectedResponses){panic(fmt.Sprintf("sampling responses: got %d, want %d",len(transport.SentResponses),len(expectedResponses)))}
+		for index,expected:=range expectedResponses{assertSubset(transport.SentResponses[index],expected,fmt.Sprintf("sampling server response %d",index))}
+		// The handler ran exactly as often as the fixture says, with the
+		// params and context it says. A malformed request must not reach it.
+		expectedCalls:=1;if raw,ok:=coreGet(fixture,"expected_handler_calls",nil).(float64);ok{expectedCalls=int(raw)}
+		if samplingCalls!=expectedCalls{panic(fmt.Sprintf("sampling handler call count: got %d, want %d",samplingCalls,expectedCalls))}
+		assertSubset(samplingParams,coreGet(fixture,"expected_handler_params",Object()),"sampling handler params")
+		assertSubset(samplingContext,coreGet(fixture,"expected_context",Object()),"sampling handler context")
+		// A callable handler is what makes the advertised capability honest.
+		initialize:=map[string]Value{};for _,request:=range transport.Requests{if display(coreGet(request,"method",""))=="initialize"{initialize=request;break}}
+		assertSubset(coreGet(asMap(coreGet(initialize,"params",Object())),"capabilities",Object()),coreGet(fixture,"expected_capabilities",Object()),"sampling client capabilities")
+		// Without a handler the same request is refused and the capability
+		// is not advertised at all.
+		withoutHandler:=asMap(coreGet(fixture,"without_handler",Object()))
+		bareOptions:=map[string]Value{};for key,value:=range asMap(coreGet(fixture,"client_options",Object())){bareOptions[key]=value}
+		bareTransport:=NewAxMCPScriptedTransport(asSlice(coreGet(fixture,"responses",Array())))
+		bare:=NewAxMCPClient(bareTransport,bareOptions);if err:=bare.Init();err!=nil{panic(err)}
+		bareTransport.Emit(cloneMCPMap(asMap(coreGet(withoutHandler,"server_request",Object()))))
+		if len(bareTransport.SentResponses)==0{panic("no response to sampling without a handler")}
+		assertSubset(bareTransport.SentResponses[0],coreGet(withoutHandler,"expected_response",Object()),"sampling without a handler")
+		bareInitialize:=map[string]Value{};for _,request:=range bareTransport.Requests{if display(coreGet(request,"method",""))=="initialize"{bareInitialize=request;break}}
+		bareCapabilities:=asMap(coreGet(asMap(coreGet(bareInitialize,"params",Object())),"capabilities",Object()))
+		for _,forbidden:=range asSlice(coreGet(withoutHandler,"forbidden_capabilities",Array())){if _,ok:=bareCapabilities[display(forbidden)];ok{panic("capability advertised without a handler: "+display(forbidden))}}
+		// The three-argument contract other ports call must not gain sampling.
+		for _,raw:=range asSlice(coreGet(fixture,"legacy_plan_cases",Array())){c:=asMap(raw);actual:=mustCore(mcp_server_request_plan(coreGet(c,"request",Object()),nil,false));assertSubset(actual,coreGet(c,"expected",Object()),"legacy three-argument sampling plan")}
+		return
 	case "server_requests_legacy":
 		for _,raw:=range asSlice(coreGet(fixture,"server_requests",Array())){transport.Emit(asMap(raw))};for index,expected:=range asSlice(coreGet(fixture,"expected_responses",Array())){assertSubset(transport.SentResponses[index],expected,fmt.Sprintf("server response %d",index))};if elicitationCalls!=1{panic("legacy elicitation handler count mismatch")};assertSubset(elicitationParams,coreGet(fixture,"expected_elicitation_params",Object()),"legacy elicitation params");assertSubset(elicitationContext,coreGet(fixture,"expected_context",Object()),"legacy elicitation context");var initialize map[string]Value;for _,request:=range transport.Requests{if display(coreGet(request,"method",""))=="initialize"{initialize=request}};assertSubset(coreGet(coreGet(initialize,"params",Object()),"capabilities",Object()),coreGet(fixture,"expected_legacy_capabilities",Object()),"legacy client capabilities")
 	case "mrtr_elicitation":
-		result,err:=client.CallTool("work",map[string]Value{"value":1});if err!=nil{panic(err)};assertSubset(result,coreGet(fixture,"expected_result",Object()),"MRTR elicitation result");if elicitationCalls!=1{panic("MRTR elicitation handler count mismatch")};assertSubset(elicitationParams,coreGet(fixture,"expected_elicitation_params",Object()),"MRTR elicitation params");assertSubset(elicitationContext,coreGet(fixture,"expected_context",Object()),"MRTR elicitation context");toolCalls:=[]map[string]Value{};for _,request:=range transport.Requests{if display(coreGet(request,"method",""))=="tools/call"{toolCalls=append(toolCalls,request)}};for index,expected:=range asSlice(coreGet(fixture,"expected_call_params",Array())){assertSubset(coreGet(toolCalls[index],"params",Object()),expected,fmt.Sprintf("MRTR elicitation call params %d",index))};meta:=asMap(coreGet(coreGet(transport.Requests[0],"params",Object()),"_meta",Object()));capabilities:=asMap(coreGet(meta,"io.modelcontextprotocol/clientCapabilities",Object()));if _,ok:=capabilities["elicitation"];!ok{panic("elicitation capability missing")};if _,ok:=capabilities["sampling"];ok{panic("sampling capability advertised")};bad:=NewAxMCPClient(NewAxMCPScriptedTransport(nil),map[string]Value{"era":"modern","sampling":true});if err:=bad.Init();err==nil||!strings.Contains(err.Error(),"sampling is not supported"){panic("truthy sampling option was accepted")}
+		result,err:=client.CallTool("work",map[string]Value{"value":1});if err!=nil{panic(err)};assertSubset(result,coreGet(fixture,"expected_result",Object()),"MRTR elicitation result");if elicitationCalls!=1{panic("MRTR elicitation handler count mismatch")};assertSubset(elicitationParams,coreGet(fixture,"expected_elicitation_params",Object()),"MRTR elicitation params");assertSubset(elicitationContext,coreGet(fixture,"expected_context",Object()),"MRTR elicitation context");toolCalls:=[]map[string]Value{};for _,request:=range transport.Requests{if display(coreGet(request,"method",""))=="tools/call"{toolCalls=append(toolCalls,request)}};for index,expected:=range asSlice(coreGet(fixture,"expected_call_params",Array())){assertSubset(coreGet(toolCalls[index],"params",Object()),expected,fmt.Sprintf("MRTR elicitation call params %d",index))};meta:=asMap(coreGet(coreGet(transport.Requests[0],"params",Object()),"_meta",Object()));capabilities:=asMap(coreGet(meta,"io.modelcontextprotocol/clientCapabilities",Object()));if _,ok:=capabilities["elicitation"];!ok{panic("elicitation capability missing")};if _,ok:=capabilities["sampling"];ok{panic("sampling capability advertised")};bad:=NewAxMCPClient(NewAxMCPScriptedTransport(nil),map[string]Value{"era":"modern","sampling":true});if err:=bad.Init();err==nil||!strings.Contains(err.Error(),"without a host handler function"){panic("a truthy sampling option is not a handler and must be rejected")}
 	case "mrtr_roots":
 		result,err:=client.CallTool("work",map[string]Value{"value":1});if err!=nil{panic(err)};assertSubset(result,coreGet(fixture,"expected_call_result",Object()),"MRTR tool result");prompt,err:=client.GetPrompt("ask",map[string]Value{});if err!=nil{panic(err)};assertSubset(prompt,coreGet(fixture,"expected_prompt_result",Object()),"MRTR prompt result");resource,err:=client.ReadResource("file:///resource");if err!=nil{panic(err)};assertSubset(resource,coreGet(fixture,"expected_resource_result",Object()),"MRTR resource result");methods:=[]Value{};toolCalls:=[]map[string]Value{};ids:=map[string]bool{};for _,request:=range transport.Requests{method:=display(coreGet(request,"method",""));methods=append(methods,method);if method=="tools/call"{toolCalls=append(toolCalls,request);id:=display(coreGet(request,"id",""));if ids[id]{panic("MRTR rounds reused a request id")};ids[id]=true}};assertEqual(methods,coreGet(fixture,"expected_methods",Array()),"MRTR request methods");for index,raw:=range asSlice(coreGet(fixture,"expected_tool_call_params",Array())){expected:=asMap(raw);params:=asMap(coreGet(toolCalls[index],"params",Object()));assertSubset(params,expected,fmt.Sprintf("MRTR tool params %d",index));expectedResponses:=coreGet(expected,"inputResponses",nil);if expectedResponses==nil{if _,ok:=params["inputResponses"];ok{panic("initial MRTR request included inputResponses")};if _,ok:=params["requestState"];ok{panic("initial MRTR request included requestState")}}else{actualKeys:=asMap(coreGet(params,"inputResponses",Object()));expectedKeys:=asMap(expectedResponses);if len(actualKeys)!=len(expectedKeys){panic("MRTR request retained stale input responses")};for key:=range expectedKeys{if _,ok:=actualKeys[key];!ok{panic("MRTR request retained stale input responses")}}};if _,wanted:=expected["requestState"];!wanted{if _,present:=params["requestState"];present{panic("MRTR request retained stale requestState")}}}
 	case "subscriptions_listen":

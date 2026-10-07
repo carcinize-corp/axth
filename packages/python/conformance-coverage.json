@@ -446,6 +446,20 @@
       {
         "suite": "axmcp",
         "kind": "mcp",
+        "operation": "server_requests_sampling",
+        "runner": "python:axmcp.server_requests_sampling",
+        "category": "transport-boundary"
+      },
+      {
+        "suite": "axmcp",
+        "kind": "mcp",
+        "operation": "app_bridge",
+        "runner": "python:axmcp.app_bridge",
+        "category": "transport-boundary"
+      },
+      {
+        "suite": "axmcp",
+        "kind": "mcp",
         "operation": "mrtr_roots",
         "runner": "python:axmcp.mrtr_roots",
         "category": "transport-boundary"

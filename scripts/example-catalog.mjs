@@ -64,6 +64,26 @@ export const publicExampleLanguages = [
     extensions: ['.rs'],
     comment: '//',
   },
+  {
+    id: 'lisp',
+    runner: 'lisp',
+    aliases: ['cl', 'sbcl', 'common-lisp'],
+    label: 'Common Lisp',
+    dir: 'lisp',
+    fence: 'lisp',
+    extensions: ['.lisp'],
+    comment: ';;',
+    // Lisp claims the shared required groups plus mcp, which the website's
+    // academy needs and this port implements natively.
+    requiredGroups: [
+      'generation',
+      'short-agents',
+      'flows',
+      'optimization',
+      'audio',
+      'mcp',
+    ],
+  },
 ];
 
 export const publicExampleLanguageById = new Map(
@@ -335,7 +355,8 @@ function validateHeader(fields, source, sourcePath) {
 function validatePublicExampleCoverage(byLanguage) {
   for (const language of publicExampleLanguages) {
     const examples = byLanguage[language.id] ?? [];
-    for (const group of requiredPublicExampleGroups) {
+    for (const group of language.requiredGroups ??
+      requiredPublicExampleGroups) {
       const rows = examples.filter((example) => example.group === group);
       if (rows.length < 3) {
         throw new Error(
@@ -429,7 +450,9 @@ async function exists(file) {
 }
 
 function commentPayload(line) {
-  return line.match(/^\s*(?:\/\/|#)\s?(.*?)\s*$/)?.[1]?.trim();
+  // // and # for the C-like and Python-like languages, ; for Common Lisp,
+  // where a file-header comment conventionally starts with ;;;; .
+  return line.match(/^\s*(?:\/\/|#|;+)\s?(.*?)\s*$/)?.[1]?.trim();
 }
 
 function splitList(value) {

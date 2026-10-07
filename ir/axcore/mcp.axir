@@ -836,13 +836,13 @@ module @ax.mcp version "0.1" {
     }
   }
 
-  op ax.mcp.semantic @mcp_server_request_plan {
+  op ax.mcp.semantic @mcp_server_request_plan_full {
     attr body_source = "core"
     attr core_kind = "func"
     attr emit_module = "mcp"
     tag "axmcp-server-requests"
-    type signature = "(request:json, roots:json, has_elicitation:bool) -> json"
-    body @entry(%request: json, %roots: json, %has_elicitation: bool) {
+    type signature = "(request:json, roots:json, has_elicitation:bool, has_sampling:bool) -> json"
+    body @entry(%request: json, %roots: json, %has_elicitation: bool, %has_sampling: bool) {
       %out = core.map
       %id = core.get %request["id"] default null
       %method = core.get %request["method"] default ""
@@ -890,6 +890,44 @@ module @ax.mcp version "0.1" {
         }
         core.return %out
       }
+      %sampling = core.call intrinsic.eq(%method, "sampling/createMessage")
+      core.if %sampling {
+        core.if %has_sampling {
+          %sampling_params = core.get %request["params"] default null
+          %sampling_missing = core.call intrinsic.is_none(%sampling_params)
+          core.if %sampling_missing {
+            %sampling_violation = core.map
+            core.set %sampling_violation["code"] = -32602
+            core.set %sampling_violation["message"] = "MCP protocol violation: sampling/createMessage omitted params"
+            %sampling_bad = core.map
+            core.set %sampling_bad["jsonrpc"] = "2.0"
+            core.set %sampling_bad["id"] = %id
+            core.set %sampling_bad["error"] = %sampling_violation
+            core.set %out["action"] = "respond"
+            core.set %out["response"] = %sampling_bad
+            core.return %out
+          }
+          %messages = core.get %sampling_params["messages"] default null
+          %messages_array = core.type_is %messages type "list"
+          %messages_missing = core.call intrinsic.not(%messages_array)
+          core.if %messages_missing {
+            %shape_error = core.map
+            core.set %shape_error["code"] = -32602
+            core.set %shape_error["message"] = "MCP protocol violation: sampling/createMessage requires a messages array"
+            %shape_response = core.map
+            core.set %shape_response["jsonrpc"] = "2.0"
+            core.set %shape_response["id"] = %id
+            core.set %shape_response["error"] = %shape_error
+            core.set %out["action"] = "respond"
+            core.set %out["response"] = %shape_response
+            core.return %out
+          }
+          core.set %out["action"] = "sampling"
+          core.set %out["id"] = %id
+          core.set %out["params"] = %sampling_params
+          core.return %out
+        }
+      }
       %error = core.map
       core.set %error["code"] = -32601
       %message = core.call intrinsic.string.format("Unsupported server request: {}", %method)
@@ -900,6 +938,578 @@ module @ax.mcp version "0.1" {
       core.set %response["error"] = %error
       core.set %out["action"] = "respond"
       core.set %out["response"] = %response
+      core.return %out
+    }
+  }
+
+  op ax.mcp.semantic @mcp_server_request_plan {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-server-requests"
+    type signature = "(request:json, roots:json, has_elicitation:bool) -> json"
+    body @entry(%request: json, %roots: json, %has_elicitation: bool) {
+      %no_sampling = core.const false
+      %plan = core.call @mcp_server_request_plan_full(%request, %roots, %has_elicitation, %no_sampling)
+      core.return %plan
+    }
+  }
+
+  op ax.mcp.semantic @mcp_app_tool_meta {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-apps"
+    type signature = "(tool:json) -> json"
+    body @entry(%tool: json) {
+      %out = core.map
+      %meta = core.get %tool["_meta"] default null
+      %ui = core.get %meta["ui"] default null
+      %ui_object = core.type_is %ui type "object"
+      %resource_uri = core.const ""
+      %visibility = core.list
+      %has_visibility = core.const false
+      core.if %ui_object {
+        %nested_uri = core.get %ui["resourceUri"] default ""
+        %nested_uri_string = core.type_is %nested_uri type "string"
+        core.if %nested_uri_string {
+          %resource_uri = core.string_trim %nested_uri
+        }
+        %nested_visibility = core.get %ui["visibility"] default null
+        %visibility_list = core.type_is %nested_visibility type "list"
+        core.if %visibility_list {
+          %has_visibility = core.const true
+          core.for %principal in %nested_visibility {
+            %is_model = core.call intrinsic.eq(%principal, "model")
+            %is_app = core.call intrinsic.eq(%principal, "app")
+            %known = core.call intrinsic.or(%is_model, %is_app)
+            core.if %known {
+              core.append %visibility, %principal
+            }
+          }
+        }
+      }
+      %uri_empty = core.call intrinsic.eq(%resource_uri, "")
+      core.if %uri_empty {
+        %flat_uri = core.get %meta["ui/resourceUri"] default ""
+        %flat_uri_string = core.type_is %flat_uri type "string"
+        core.if %flat_uri_string {
+          %resource_uri = core.string_trim %flat_uri
+        }
+      }
+      core.set %out["resourceUri"] = %resource_uri
+      core.set %out["visibility"] = %visibility
+      core.set %out["hasVisibility"] = %has_visibility
+      core.return %out
+    }
+  }
+
+  op ax.mcp.semantic @mcp_app_tool_visible_to {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-apps"
+    type signature = "(tool:json, principal:string) -> bool"
+    body @entry(%tool: json, %principal: string) {
+      %meta = core.call @mcp_app_tool_meta(%tool)
+      %declared = core.get %meta["hasVisibility"] default false
+      %visible = core.const true
+      core.if %declared {
+        %visibility = core.get %meta["visibility"] default null
+        %visible = core.call intrinsic.contains(%visibility, %principal)
+      }
+      core.return %visible
+    }
+  }
+
+  op ax.mcp.semantic @mcp_app_resource_policy {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-apps"
+    type signature = "(meta:json) -> json"
+    body @entry(%meta: json) {
+      %out = core.map
+      %csp = core.get %meta["csp"] default null
+      %resource_domains = core.get %csp["resourceDomains"] default null
+      %connect_domains = core.get %csp["connectDomains"] default null
+      %frame_domains = core.get %csp["frameDomains"] default null
+      %base_domains = core.get %csp["baseUriDomains"] default null
+      %resources = core.call @mcp_app_csp_source_list(%resource_domains)
+      %resources_ok = core.get %resources["ok"] default false
+      %resources_bad = core.call intrinsic.not(%resources_ok)
+      core.if %resources_bad {
+        core.return %resources
+      }
+      %connect = core.call @mcp_app_csp_source_list(%connect_domains)
+      %connect_ok = core.get %connect["ok"] default false
+      %connect_bad = core.call intrinsic.not(%connect_ok)
+      core.if %connect_bad {
+        core.return %connect
+      }
+      %frames = core.call @mcp_app_csp_source_list(%frame_domains)
+      %frames_ok = core.get %frames["ok"] default false
+      %frames_bad = core.call intrinsic.not(%frames_ok)
+      core.if %frames_bad {
+        core.return %frames
+      }
+      %bases = core.call @mcp_app_csp_source_list(%base_domains)
+      %bases_ok = core.get %bases["ok"] default false
+      %bases_bad = core.call intrinsic.not(%bases_ok)
+      core.if %bases_bad {
+        core.return %bases
+      }
+      %resource_value = core.get %resources["value"] default ""
+      %connect_value = core.get %connect["value"] default ""
+      %frame_value = core.get %frames["value"] default ""
+      %base_value = core.get %bases["value"] default ""
+      %resource_suffix = core.const ""
+      %resource_present = core.call intrinsic.ne(%resource_value, "")
+      core.if %resource_present {
+        %resource_suffix = core.call intrinsic.string.format(" {}", %resource_value)
+      }
+      %directives = core.list
+      core.append %directives, "default-src 'none'"
+      %script_src = core.call intrinsic.string.format("script-src 'self' 'unsafe-inline'{}", %resource_suffix)
+      core.append %directives, %script_src
+      %style_src = core.call intrinsic.string.format("style-src 'self' 'unsafe-inline'{}", %resource_suffix)
+      core.append %directives, %style_src
+      %connect_src = core.const "connect-src 'none'"
+      %connect_present = core.call intrinsic.ne(%connect_value, "")
+      core.if %connect_present {
+        %connect_src = core.call intrinsic.string.format("connect-src 'self' {}", %connect_value)
+      }
+      core.append %directives, %connect_src
+      %img_src = core.call intrinsic.string.format("img-src 'self' data:{}", %resource_suffix)
+      core.append %directives, %img_src
+      %font_src = core.call intrinsic.string.format("font-src 'self'{}", %resource_suffix)
+      core.append %directives, %font_src
+      %media_src = core.call intrinsic.string.format("media-src 'self' data:{}", %resource_suffix)
+      core.append %directives, %media_src
+      %frame_src = core.const "frame-src 'none'"
+      %frame_present = core.call intrinsic.ne(%frame_value, "")
+      core.if %frame_present {
+        %frame_src = core.call intrinsic.string.format("frame-src {}", %frame_value)
+      }
+      core.append %directives, %frame_src
+      core.append %directives, "object-src 'none'"
+      %base_uri = core.const "base-uri 'self'"
+      %base_present = core.call intrinsic.ne(%base_value, "")
+      core.if %base_present {
+        %base_uri = core.call intrinsic.string.format("base-uri {}", %base_value)
+      }
+      core.append %directives, %base_uri
+      %policy = core.string_join %directives sep "; "
+      %permissions = core.get %meta["permissions"] default null
+      %granted = core.list
+      %camera = core.get %permissions["camera"] default null
+      %camera_present = core.call intrinsic.is_not_none(%camera)
+      core.if %camera_present {
+        core.append %granted, "camera"
+      }
+      %microphone = core.get %permissions["microphone"] default null
+      %microphone_present = core.call intrinsic.is_not_none(%microphone)
+      core.if %microphone_present {
+        core.append %granted, "microphone"
+      }
+      %geolocation = core.get %permissions["geolocation"] default null
+      %geolocation_present = core.call intrinsic.is_not_none(%geolocation)
+      core.if %geolocation_present {
+        core.append %granted, "geolocation"
+      }
+      %clipboard = core.get %permissions["clipboardWrite"] default null
+      %clipboard_present = core.call intrinsic.is_not_none(%clipboard)
+      core.if %clipboard_present {
+        core.append %granted, "clipboard-write"
+      }
+      %permission_policy = core.string_join %granted sep "; "
+      core.set %out["ok"] = true
+      core.set %out["sandbox"] = "allow-scripts allow-same-origin"
+      core.set %out["contentSecurityPolicy"] = %policy
+      core.set %out["permissionPolicy"] = %permission_policy
+      core.return %out
+    }
+  }
+
+  op ax.mcp.semantic @mcp_app_csp_source_list {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-apps"
+    type signature = "(values:json) -> json"
+    body @entry(%values: json) {
+      %out = core.map
+      %parts = core.list
+      %is_list = core.type_is %values type "list"
+      core.if %is_list {
+        core.for %value in %values {
+          %value_string = core.type_is %value type "string"
+          %value_invalid = core.call intrinsic.not(%value_string)
+          core.if %value_invalid {
+            core.set %out["ok"] = false
+            core.set %out["message"] = "Unsafe MCP App CSP source: not a string"
+            core.return %out
+          }
+          %unsafe = core.regex_match %value pattern "[\\s;'\"`]"
+          core.if %unsafe {
+            core.set %out["ok"] = false
+            %unsafe_message = core.call intrinsic.string.format("Unsafe MCP App CSP source: {}", %value)
+            core.set %out["message"] = %unsafe_message
+            core.return %out
+          }
+          %lowered = core.call intrinsic.string.lower(%value)
+          %allowed = core.regex_match %lowered pattern "^(?:https|wss)://(?:\\*\\.)?[a-z0-9.-]+(?::[0-9]+)?$"
+          %not_allowed = core.call intrinsic.not(%allowed)
+          core.if %not_allowed {
+            core.set %out["ok"] = false
+            %scheme_message = core.call intrinsic.string.format("Unsafe MCP App CSP source: {}", %value)
+            core.set %out["message"] = %scheme_message
+            core.return %out
+          }
+          core.append %parts, %value
+        }
+      }
+      %joined = core.string_join %parts sep " "
+      core.set %out["ok"] = true
+      core.set %out["value"] = %joined
+      core.return %out
+    }
+  }
+
+  op ax.mcp.semantic @mcp_app_resource_plan {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-apps"
+    type signature = "(tool_name:string, uri:string, mime_type:string, html:string, meta:json) -> json"
+    body @entry(%tool_name: string, %uri: string, %mime_type: string, %html: string, %meta: json) {
+      %out = core.map
+      %ui_scheme = core.call intrinsic.string.starts_with(%uri, "ui://")
+      %bad_scheme = core.call intrinsic.not(%ui_scheme)
+      core.if %bad_scheme {
+        core.set %out["ok"] = false
+        %scheme_message = core.call intrinsic.string.format("MCP App tool {} has no valid ui:// resource", %tool_name)
+        core.set %out["message"] = %scheme_message
+        core.return %out
+      }
+      %expected_mime = core.const "text/html;profile=mcp-app"
+      %mime_ok = core.call intrinsic.eq(%mime_type, %expected_mime)
+      %mime_bad = core.call intrinsic.not(%mime_ok)
+      core.if %mime_bad {
+        core.set %out["ok"] = false
+        %mime_message = core.call intrinsic.string.format("MCP App resource {} has invalid MIME type {}", %uri, %mime_type)
+        core.set %out["message"] = %mime_message
+        core.return %out
+      }
+      %lowered = core.call intrinsic.string.lower(%html)
+      %is_document = core.regex_match %lowered pattern "<(?:!doctype\\s+html|html)(?:\\s|>)"
+      %not_document = core.call intrinsic.not(%is_document)
+      core.if %not_document {
+        core.set %out["ok"] = false
+        %html_message = core.call intrinsic.string.format("MCP App resource {} is not an HTML document", %uri)
+        core.set %out["message"] = %html_message
+        core.return %out
+      }
+      %policy = core.call @mcp_app_resource_policy(%meta)
+      %policy_ok = core.get %policy["ok"] default false
+      %policy_bad = core.call intrinsic.not(%policy_ok)
+      core.if %policy_bad {
+        core.return %policy
+      }
+      %resource = core.map
+      core.set %resource["uri"] = %uri
+      core.set %resource["mimeType"] = %expected_mime
+      core.set %resource["html"] = %html
+      core.set %resource["meta"] = %meta
+      %sandbox = core.get %policy["sandbox"] default ""
+      core.set %resource["sandbox"] = %sandbox
+      %csp = core.get %policy["contentSecurityPolicy"] default ""
+      core.set %resource["contentSecurityPolicy"] = %csp
+      %permission_policy = core.get %policy["permissionPolicy"] default ""
+      core.set %resource["permissionPolicy"] = %permission_policy
+      core.set %out["ok"] = true
+      core.set %out["resource"] = %resource
+      core.return %out
+    }
+  }
+
+  op ax.mcp.semantic @mcp_app_view_message_plan {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr emit_module = "mcp"
+    tag "axmcp-apps"
+    type signature = "(message:json, initialized:bool, context:json) -> json"
+    body @entry(%message: json, %initialized: bool, %context: json) {
+      %out = core.map
+      %has_method = core.call intrinsic.map.contains(%message, "method")
+      %no_method = core.call intrinsic.not(%has_method)
+      core.if %no_method {
+        core.set %out["action"] = "ignore"
+        core.set %out["reason"] = "not a request or notification"
+        core.return %out
+      }
+      %method = core.get %message["method"] default ""
+      %id = core.get %message["id"] default null
+      %params = core.get %message["params"] default null
+      %is_request = core.call intrinsic.map.contains(%message, "id")
+      %is_notification = core.call intrinsic.not(%is_request)
+      core.if %is_notification {
+        %initialized_notification = core.call intrinsic.eq(%method, "ui/notifications/initialized")
+        core.if %initialized_notification {
+          core.set %out["action"] = "initialized"
+          core.return %out
+        }
+        %uninitialized = core.call intrinsic.not(%initialized)
+        core.if %uninitialized {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "MCP App sent a notification before initialization"
+          core.return %out
+        }
+        %reserved = core.call intrinsic.string.starts_with(%method, "ui/notifications/sandbox-")
+        core.if %reserved {
+          core.set %out["action"] = "error"
+          %reserved_message = core.call intrinsic.string.format("Reserved MCP App sandbox message: {}", %method)
+          core.set %out["reason"] = %reserved_message
+          core.return %out
+        }
+        %log_notification = core.call intrinsic.eq(%method, "notifications/message")
+        core.if %log_notification {
+          core.set %out["action"] = "log"
+          core.set %out["params"] = %params
+          core.return %out
+        }
+        %size_notification = core.call intrinsic.eq(%method, "ui/notifications/size-changed")
+        core.if %size_notification {
+          %width = core.get %params["width"] default null
+          %height = core.get %params["height"] default null
+          %width_number = core.type_is %width type "number"
+          %height_number = core.type_is %height type "number"
+          %size_valid = core.call intrinsic.and(%width_number, %height_number)
+          core.if %size_valid {
+            core.set %out["action"] = "size-changed"
+            %size = core.map
+            core.set %size["width"] = %width
+            core.set %size["height"] = %height
+            core.set %out["size"] = %size
+            core.return %out
+          }
+          core.set %out["action"] = "ignore"
+          core.set %out["reason"] = "size-changed without numeric width and height"
+          core.return %out
+        }
+        core.set %out["action"] = "ignore"
+        core.set %out["reason"] = %method
+        core.return %out
+      }
+      core.set %out["id"] = %id
+      %initialize_request = core.call intrinsic.eq(%method, "ui/initialize")
+      core.if %initialize_request {
+        %result = core.map
+        core.set %result["protocolVersion"] = "2026-01-26"
+        %host_capabilities = core.get %context["hostCapabilities"] default null
+        %capabilities_object = core.type_is %host_capabilities type "object"
+        core.if %capabilities_object {
+          core.set %result["hostCapabilities"] = %host_capabilities
+        } else {
+          %default_capabilities = core.map
+          %server_tools = core.map
+          core.set %server_tools["listChanged"] = true
+          core.set %default_capabilities["serverTools"] = %server_tools
+          %server_resources = core.map
+          core.set %server_resources["listChanged"] = true
+          core.set %default_capabilities["serverResources"] = %server_resources
+          %logging = core.map
+          core.set %default_capabilities["logging"] = %logging
+          %sandbox = core.map
+          core.set %default_capabilities["sandbox"] = %sandbox
+          core.set %result["hostCapabilities"] = %default_capabilities
+        }
+        %host_context = core.get %context["hostContext"] default null
+        %context_object = core.type_is %host_context type "object"
+        core.if %context_object {
+          core.set %result["hostContext"] = %host_context
+        } else {
+          %empty_context = core.map
+          core.set %result["hostContext"] = %empty_context
+        }
+        core.set %out["action"] = "respond"
+        core.set %out["result"] = %result
+        core.return %out
+      }
+      %uninitialized_request = core.call intrinsic.not(%initialized)
+      core.if %uninitialized_request {
+        core.set %out["action"] = "error"
+        core.set %out["reason"] = "MCP App is not initialized"
+        core.return %out
+      }
+      %ping_request = core.call intrinsic.eq(%method, "ping")
+      core.if %ping_request {
+        %ping_result = core.map
+        core.set %out["action"] = "respond"
+        core.set %out["result"] = %ping_result
+        core.return %out
+      }
+      %tool_call = core.call intrinsic.eq(%method, "tools/call")
+      core.if %tool_call {
+        %name = core.get %params["name"] default null
+        %name_string = core.type_is %name type "string"
+        %name_missing = core.call intrinsic.not(%name_string)
+        core.if %name_missing {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "Missing tool name"
+          core.return %out
+        }
+        %tools = core.get %context["tools"] default null
+        %match = core.call intrinsic.none()
+        %tool_list = core.type_is %tools type "list"
+        core.if %tool_list {
+          core.for %candidate in %tools {
+            %candidate_name = core.get %candidate["name"] default ""
+            %same = core.call intrinsic.eq(%candidate_name, %name)
+            core.if %same {
+              %match = core.let %candidate
+            }
+          }
+        }
+        %missing_tool = core.call intrinsic.is_none(%match)
+        core.if %missing_tool {
+          core.set %out["action"] = "error"
+          %unknown_message = core.call intrinsic.string.format("MCP App cannot call tool {}", %name)
+          core.set %out["reason"] = %unknown_message
+          core.return %out
+        }
+        %visible = core.call @mcp_app_tool_visible_to(%match, "app")
+        %hidden = core.call intrinsic.not(%visible)
+        core.if %hidden {
+          core.set %out["action"] = "error"
+          %hidden_message = core.call intrinsic.string.format("MCP App cannot call tool {}", %name)
+          core.set %out["reason"] = %hidden_message
+          core.return %out
+        }
+        core.set %out["action"] = "call-tool"
+        core.set %out["name"] = %name
+        %arguments = core.get %params["arguments"] default null
+        %arguments_object = core.type_is %arguments type "object"
+        core.if %arguments_object {
+          core.set %out["arguments"] = %arguments
+        } else {
+          %empty_arguments = core.map
+          core.set %out["arguments"] = %empty_arguments
+        }
+        core.return %out
+      }
+      %resource_read = core.call intrinsic.eq(%method, "resources/read")
+      core.if %resource_read {
+        %uri = core.get %params["uri"] default null
+        %uri_string = core.type_is %uri type "string"
+        %uri_missing = core.call intrinsic.not(%uri_string)
+        core.if %uri_missing {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "Missing resource URI"
+          core.return %out
+        }
+        core.set %out["action"] = "read-resource"
+        core.set %out["uri"] = %uri
+        core.return %out
+      }
+      %open_link = core.call intrinsic.eq(%method, "ui/open-link")
+      core.if %open_link {
+        %url = core.get %params["url"] default null
+        %url_string = core.type_is %url type "string"
+        %url_present = core.const false
+        core.if %url_string {
+          %lowered_url = core.call intrinsic.string.lower(%url)
+          %url_present = core.regex_match %lowered_url pattern "^https?://"
+        }
+        %url_invalid = core.call intrinsic.not(%url_present)
+        core.if %url_invalid {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "MCP App link must be HTTP(S)"
+          core.return %out
+        }
+        %link_enabled = core.get %context["canOpenLink"] default false
+        %link_disabled = core.call intrinsic.not(%link_enabled)
+        core.if %link_disabled {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "Link opening is disabled"
+          core.return %out
+        }
+        core.set %out["action"] = "open-link"
+        core.set %out["url"] = %url
+        core.return %out
+      }
+      %app_message = core.call intrinsic.eq(%method, "ui/message")
+      core.if %app_message {
+        %message_enabled = core.get %context["canSendMessage"] default false
+        %message_disabled = core.call intrinsic.not(%message_enabled)
+        core.if %message_disabled {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "App messages are disabled"
+          core.return %out
+        }
+        core.set %out["action"] = "send-message"
+        %message_params = core.map
+        %params_object = core.type_is %params type "object"
+        core.if %params_object {
+          core.set %out["params"] = %params
+        } else {
+          core.set %out["params"] = %message_params
+        }
+        core.return %out
+      }
+      %update_context = core.call intrinsic.eq(%method, "ui/update-model-context")
+      core.if %update_context {
+        %update_enabled = core.get %context["canUpdateModelContext"] default false
+        %update_disabled = core.call intrinsic.not(%update_enabled)
+        core.if %update_disabled {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "App model-context updates are disabled"
+          core.return %out
+        }
+        %update = core.map
+        %content = core.get %params["content"] default null
+        %content_present = core.call intrinsic.is_not_none(%content)
+        core.if %content_present {
+          core.set %update["content"] = %content
+        }
+        %structured = core.get %params["structuredContent"] default null
+        %structured_present = core.call intrinsic.is_not_none(%structured)
+        core.if %structured_present {
+          core.set %update["structuredContent"] = %structured
+        }
+        core.set %update["untrusted"] = true
+        %source = core.map
+        core.set %source["kind"] = "mcp-app"
+        %namespace = core.get %context["namespace"] default ""
+        core.set %source["namespace"] = %namespace
+        %tool_name = core.get %context["tool"] default ""
+        core.set %source["tool"] = %tool_name
+        core.set %update["source"] = %source
+        core.set %out["action"] = "update-model-context"
+        core.set %out["update"] = %update
+        core.return %out
+      }
+      %display_mode = core.call intrinsic.eq(%method, "ui/request-display-mode")
+      core.if %display_mode {
+        %mode = core.get %params["mode"] default null
+        %inline_mode = core.call intrinsic.eq(%mode, "inline")
+        %fullscreen_mode = core.call intrinsic.eq(%mode, "fullscreen")
+        %pip_mode = core.call intrinsic.eq(%mode, "pip")
+        %windowed = core.call intrinsic.or(%inline_mode, %fullscreen_mode)
+        %mode_valid = core.call intrinsic.or(%windowed, %pip_mode)
+        %mode_invalid = core.call intrinsic.not(%mode_valid)
+        core.if %mode_invalid {
+          core.set %out["action"] = "error"
+          core.set %out["reason"] = "Invalid MCP App display mode"
+          core.return %out
+        }
+        core.set %out["action"] = "request-display-mode"
+        core.set %out["mode"] = %mode
+        core.return %out
+      }
+      core.set %out["action"] = "error"
+      %unsupported = core.call intrinsic.string.format("Unsupported MCP App request: {}", %method)
+      core.set %out["reason"] = %unsupported
       core.return %out
     }
   }
@@ -2234,4 +2844,248 @@ module @ax.mcp version "0.1" {
       core.return %out
     }
   }
+  // UCP HTTP Message Signatures, the portable half.
+  //
+  // Derived by direct comparison with src/ax/ucp/signing.ts axSignUCPRequest
+  // (lines 73-136) rather than from a search for Core functions: the default
+  // component selection, the @signature-params string, the signature base
+  // line format and the two output header shapes are all policy that every
+  // port must agree on byte for byte, because a verifier on the other side
+  // reconstructs the same base. The crypto, the clock, URL parsing and the
+  // key fetch stay native; this op never sees a key.
+  //
+  // Components are selected exactly as the reference does: @method,
+  // @authority and @path always; @query only when the URL has one; ucp-agent
+  // and idempotency-key only when that header is present; content-digest and
+  // content-type only when there is a body.
+  op ax.mcp.semantic @ucp_signature_components {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr effect = "pure"
+    attr emit_module = "mcp"
+    tag "ucp-http-message-signatures"
+    type signature = "(bool, bool, bool, bool) -> list<string>"
+    body @entry(%has_query: bool, %has_agent: bool, %has_idempotency: bool, %has_body: bool) {
+      %components = core.list
+      core.append %components, "@method"
+      core.append %components, "@authority"
+      core.append %components, "@path"
+      core.if %has_query {
+        core.append %components, "@query"
+      }
+      core.if %has_agent {
+        core.append %components, "ucp-agent"
+      }
+      core.if %has_idempotency {
+        core.append %components, "idempotency-key"
+      }
+      core.if %has_body {
+        core.append %components, "content-digest"
+        core.append %components, "content-type"
+      }
+      core.return %components
+    }
+  }
+
+  // The @signature-params value: ("a" "b");created=N;keyid="K" with optional
+  // ;alg="A" and ;nonce="N", in that order. A quote inside the key id is
+  // backslash-escaped, as the reference does with replaceAll.
+  op ax.mcp.semantic @ucp_signature_params {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr effect = "pure"
+    attr emit_module = "mcp"
+    tag "ucp-http-message-signatures"
+    type signature = "(list<string>, number, string, json, json) -> string"
+    body @entry(%components: list<string>, %created: number, %key_id: string, %algorithm: json, %nonce: json) {
+      %quoted = core.list
+      core.for %component in %components {
+        %quoted_component = core.call intrinsic.string.format("\"{}\"", %component)
+        core.append %quoted, %quoted_component
+      }
+      %component_list = core.call intrinsic.string.join(" ", %quoted)
+      %escaped_key = core.call intrinsic.string.replace(%key_id, "\"", "\\\"")
+      %created_text = core.call intrinsic.json.stringify(%created)
+      %params = core.call intrinsic.string.format("({});created={};keyid=\"{}\"", %component_list, %created_text, %escaped_key)
+      %algorithm_string = core.type_is %algorithm type "string"
+      core.if %algorithm_string {
+        %params = core.call intrinsic.string.format("{};alg=\"{}\"", %params, %algorithm)
+      }
+      %nonce_string = core.type_is %nonce type "string"
+      core.if %nonce_string {
+        %params = core.call intrinsic.string.format("{};nonce=\"{}\"", %params, %nonce)
+      }
+      core.return %params
+    }
+  }
+
+  // The signature base: one line per component as "name": value, then a final
+  // "@signature-params": params line, joined with newlines. VALUES must carry
+  // every component in COMPONENTS; a missing one is the caller's bug and is
+  // raised rather than signed over an empty string, because signing a base
+  // the verifier cannot rebuild is worse than failing.
+  op ax.mcp.semantic @ucp_signature_base {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr effect = "throws"
+    attr emit_module = "mcp"
+    tag "ucp-http-message-signatures"
+    type signature = "(list<string>, json, string) -> string throws"
+    body @entry(%components: list<string>, %values: json, %params: string) {
+      %lines = core.list
+      core.for %component in %components {
+        %value = core.get %values[%component] default null
+        %missing = core.call intrinsic.is_none(%value)
+        core.if %missing {
+          core.raise "UCP signature component is missing"
+        }
+        %line = core.call intrinsic.string.format("\"{}\": {}", %component, %value)
+        core.append %lines, %line
+      }
+      %params_line = core.call intrinsic.string.format("\"@signature-params\": {}", %params)
+      core.append %lines, %params_line
+      %base = core.call intrinsic.string.join("\n", %lines)
+      core.return %base
+    }
+  }
+
+  // The two headers a signed request carries. The signature is already
+  // base64 by the time it arrives here; wrapping it in colons is the
+  // structured-field byte-sequence form RFC 9421 requires.
+  op ax.mcp.semantic @ucp_signature_headers {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr effect = "pure"
+    attr emit_module = "mcp"
+    tag "ucp-http-message-signatures"
+    type signature = "(string, string, string) -> json"
+    body @entry(%label: string, %params: string, %signature: string) {
+      %out = core.map
+      %input_value = core.call intrinsic.string.format("{}={}", %label, %params)
+      core.set %out["Signature-Input"] = %input_value
+      %signature_value = core.call intrinsic.string.format("{}=:{}:", %label, %signature)
+      core.set %out["Signature"] = %signature_value
+      core.return %out
+    }
+  }
+
+  // Everything the verifier decides BEFORE any crypto, as
+  // AxUCPHTTPMessageVerifier.verify does: presence, expiry and clock skew,
+  // a created time in the future, maximum age, mandatory @status coverage,
+  // and mandatory digest plus content-type coverage whenever there is a
+  // body. Returns {ok, code, message}; the codes are the reference's
+  // AxUCPHTTPMessageSignatureErrorCode values so a host raises the same one.
+  op ax.mcp.semantic @ucp_verify_signature_policy {
+    attr body_source = "core"
+    attr core_kind = "func"
+    attr effect = "pure"
+    attr emit_module = "mcp"
+    tag "ucp-http-message-signatures"
+    type signature = "(json, number, json) -> json"
+    body @entry(%input: json, %now: number, %options: json) {
+      %out = core.map
+      core.set %out["ok"] = false
+      core.set %out["code"] = ""
+      core.set %out["message"] = ""
+      %present = core.get %input["present"] default false
+      %absent = core.call intrinsic.not(%present)
+      core.if %absent {
+        %required = core.get %options["required"] default false
+        core.if %required {
+          core.set %out["code"] = "signature_missing"
+          core.set %out["message"] = "UCP response signature is required"
+          core.return %out
+        }
+        core.set %out["ok"] = true
+        core.set %out["code"] = "absent"
+        core.return %out
+      }
+      %tolerance = core.get %options["clockToleranceSeconds"] default 60
+      %expires = core.get %input["expires"] default null
+      %has_expires = core.type_is %expires type "number"
+      core.if %has_expires {
+        %expiry_limit = core.call intrinsic.add(%expires, %tolerance)
+        %expired = core.call intrinsic.gt(%now, %expiry_limit)
+        core.if %expired {
+          core.set %out["code"] = "signature_expired"
+          core.set %out["message"] = "UCP response signature has expired"
+          core.return %out
+        }
+      }
+      %created = core.get %input["created"] default null
+      %has_created = core.type_is %created type "number"
+      core.if %has_created {
+        %future_limit = core.call intrinsic.add(%now, %tolerance)
+        %future = core.call intrinsic.gt(%created, %future_limit)
+        core.if %future {
+          core.set %out["code"] = "signature_invalid"
+          core.set %out["message"] = "UCP response signature creation time is in the future"
+          core.return %out
+        }
+      }
+      %max_age = core.get %options["maxAgeSeconds"] default null
+      %has_max_age = core.type_is %max_age type "number"
+      core.if %has_max_age {
+        %no_created = core.call intrinsic.not(%has_created)
+        core.if %no_created {
+          core.set %out["code"] = "signature_expired"
+          core.set %out["message"] = "UCP response signature is too old or missing created"
+          core.return %out
+        }
+        // now - created > maxAge + tolerance, rearranged as
+        // now > created + maxAge + tolerance because Core has no subtraction
+        // intrinsic. Exactly equivalent over reals, and it keeps every
+        // intermediate non-negative.
+        %age_allowance = core.call intrinsic.add(%max_age, %tolerance)
+        %age_limit = core.call intrinsic.add(%created, %age_allowance)
+        %too_old = core.call intrinsic.gt(%now, %age_limit)
+        core.if %too_old {
+          core.set %out["code"] = "signature_expired"
+          core.set %out["message"] = "UCP response signature is too old or missing created"
+          core.return %out
+        }
+      }
+      %components = core.get %input["components"] default null
+      %components_list = core.type_is %components type "list"
+      %covers_status = core.const false
+      core.if %components_list {
+        %covers_status = core.call intrinsic.contains(%components, "@status")
+      }
+      %no_status = core.call intrinsic.not(%covers_status)
+      core.if %no_status {
+        core.set %out["code"] = "signature_invalid"
+        core.set %out["message"] = "UCP response signature does not cover @status"
+        core.return %out
+      }
+      %has_body = core.get %input["hasBody"] default false
+      core.if %has_body {
+        %covers_digest = core.const false
+        %covers_type = core.const false
+        core.if %components_list {
+          %covers_digest = core.call intrinsic.contains(%components, "content-digest")
+          %covers_type = core.call intrinsic.contains(%components, "content-type")
+        }
+        %covers_body = core.call intrinsic.and(%covers_digest, %covers_type)
+        %body_uncovered = core.call intrinsic.not(%covers_body)
+        core.if %body_uncovered {
+          core.set %out["code"] = "signature_invalid"
+          core.set %out["message"] = "UCP response signature does not cover body digest and content type"
+          core.return %out
+        }
+      }
+      %replay_protection = core.get %options["replayProtection"] default false
+      core.if %replay_protection {
+        %seen = core.get %input["seen"] default false
+        core.if %seen {
+          core.set %out["code"] = "signature_replayed"
+          core.set %out["message"] = "UCP response signature was replayed"
+          core.return %out
+        }
+      }
+      core.set %out["ok"] = true
+      core.set %out["code"] = "verified"
+      core.return %out
+    }
+  }
+
 }

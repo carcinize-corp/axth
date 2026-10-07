@@ -6,9 +6,10 @@
     (dict "id" "cpp" "label" "C++" "package" "axllm::axllm" "status" "CMake FetchContent" "href" "/cpp/quick-start/")
     (dict "id" "go" "label" "Go" "package" "github.com/ax-llm/ax/packages/go" "status" "go get" "href" "/go/quick-start/")
     (dict "id" "rust" "label" "Rust" "package" "axllm" "status" "on crates.io" "href" "/rust/quick-start/")
+    (dict "id" "lisp" "label" "Common Lisp" "package" "axllm" "status" "ASDF system" "href" "/lisp/quick-start/")
   }}
   {{ range $languages }}
-    <a href="{{ .href | relURL }}">
+    <a href="{{ .href }}">
       {{ partial "language-mark.html" . }}
       <span>
         <strong>{{ .label }}</strong>

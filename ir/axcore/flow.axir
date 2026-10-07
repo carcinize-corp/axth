@@ -2384,19 +2384,21 @@ module @ax.flow version "0.1" {
       %header = core.call intrinsic.string.format("flowchart {}", %direction)
       core.append %lines, %header
       %directives = core.get %ast["directives"]
-      %directive_order = core.get %ast["directiveOrder"]
+      %order = core.get %ast["order"]
       %percent = core.get %ast["percent"] default ""
-      core.for %id in %directive_order {
-        %signature_text = core.get %directives[%id]
-        %signature = core.call @parse_signature(%signature_text)
-        %canonical = core.call @signature_to_string(%signature)
-        %prefix = core.call intrinsic.string.format("{}{}ax", %percent, %percent)
-        %directive = core.call intrinsic.string.format("  {} {}: {}", %prefix, %id, %canonical)
-        core.append %lines, %directive
+      core.for %id in %order {
+        %has_directive = core.call intrinsic.map.contains(%directives, %id)
+        core.if %has_directive {
+          %signature_text = core.get %directives[%id]
+          %signature = core.call @parse_signature(%signature_text)
+          %canonical = core.call @signature_to_string(%signature)
+          %prefix = core.call intrinsic.string.format("{}{}ax", %percent, %percent)
+          %directive = core.call intrinsic.string.format("  {} {}: {}", %prefix, %id, %canonical)
+          core.append %lines, %directive
+        }
       }
       core.append %lines, ""
       %nodes = core.get %ast["nodes"]
-      %order = core.get %ast["order"]
       %compile_order = core.get %ast["compileOrder"] default %order
       %order_index = core.get %ast["orderIndex"]
       %edges = core.get %ast["edges"]

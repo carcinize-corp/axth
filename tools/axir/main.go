@@ -205,13 +205,13 @@ func runExplain(args []string) error {
 func runCompile(args []string) error {
 	fs := flag.NewFlagSet("compile", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	target := fs.String("target", "", "compile target: python, java, cpp, go, or rust")
+	target := fs.String("target", "", "compile target: python, java, cpp, go, rust, or lisp")
 	outDir := fs.String("out", "", "output directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *target == "" {
-		return fmt.Errorf("compile requires --target python|java|cpp|go|rust")
+		return fmt.Errorf("compile requires --target python|java|cpp|go|rust|lisp")
 	}
 	if *outDir == "" {
 		return fmt.Errorf("compile requires --out <dir>")
@@ -233,7 +233,10 @@ func runCompile(args []string) error {
 func runAudit(args []string) error {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	targets := fs.String("targets", "python,java,cpp,go,rust", "comma-separated targets to audit")
+	// lisp is registered but opt-in: it claims no conformance suite yet, so
+	// it stays out of the default audit set for the same reason it stays
+	// out of the default verify set.
+	targets := fs.String("targets", "python,java,cpp,go,rust", "comma-separated targets to audit (add lisp explicitly)")
 	conformanceRoot := fs.String("conformance", "ir/conformance", "conformance suite root (coverage audit)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -261,6 +264,7 @@ func runAudit(args []string) error {
 		"cpp":    axir.EmitCpp,
 		"go":     axir.EmitGo,
 		"rust":   axir.EmitRust,
+		"lisp":   axir.EmitLisp,
 	}
 	failed := false
 	for _, target := range strings.Split(*targets, ",") {
@@ -329,6 +333,7 @@ func runCoverageAudit(root, targets, conformanceRoot string) error {
 		"cpp":    axir.EmitCpp,
 		"go":     axir.EmitGo,
 		"rust":   axir.EmitRust,
+		"lisp":   axir.EmitLisp,
 	}
 	var reports []axir.CoverageReport
 	for _, target := range strings.Split(targets, ",") {
@@ -392,7 +397,7 @@ func runCoverageAudit(root, targets, conformanceRoot string) error {
 func runVerify(args []string) error {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	targetsText := fs.String("targets", "python,java,cpp,go,rust", "comma-separated targets: python,java,cpp,go,rust")
+	targetsText := fs.String("targets", "python,java,cpp,go,rust", "comma-separated targets: python,java,cpp,go,rust,lisp (lisp is not in the default set)")
 	workDir := fs.String("workdir", "", "optional verification output directory")
 	runtimeProfilesText := fs.String("runtime-profiles", "", "comma-separated optional runtime profiles, e.g. javascript-quickjs,javascript-goja")
 	mode := fs.String("mode", axir.VerifyModeRelease, "verification mode: dev or release")
@@ -460,7 +465,7 @@ commands:
   lower --to core <root>                 lower Ax dialects to Core IR
   lint [--profile llm-core] <roots...>   lint for the LLM authoring profile
   explain --symbol NAME <root>           explain a lowered symbol
-  compile --target python|java|cpp|go|rust --out DIR <file>
-  verify [--mode dev|release] [--jobs N] [--progress|--no-progress] [--targets python,java,cpp,go,rust] [--workdir DIR] [--runtime-profiles javascript-quickjs,javascript-goja] <root>
+  compile --target python|java|cpp|go|rust|lisp --out DIR <file>
+  verify [--mode dev|release] [--jobs N] [--progress|--no-progress] [--targets python,java,cpp,go,rust,lisp] [--workdir DIR] [--runtime-profiles javascript-quickjs,javascript-goja] <root>
 `
 }

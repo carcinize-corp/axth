@@ -69,6 +69,7 @@ def _core_and(left, right): return bool(left and right)
 def _core_or(left, right): return bool(left or right)
 def _core_not(value): return not bool(value)
 def _core_eq(left, right): return left == right
+def _core_ne(left, right): return left != right
 def _core_lt(left, right): return left < right
 def _core_lte(left, right): return left <= right
 def _core_gt(left, right): return left > right
@@ -155,20 +156,9 @@ def ucp_normalize_outcome(operation: str, response: Any) -> Any:
 
 def event_runtime_descriptor(routes: list[Any], options: Any) -> Any:
     _core_coverage_mark("event_runtime_descriptor")
-    empty = {}
-    missing = _core_is_none(options)
-    opts = options
-    if missing:
-        opts = empty
-    else:
-        pass
-    out = {}
-    out["routes"] = routes
-    out["options"] = opts
-    out["durability"] = "volatile"
-    out["coordination"] = "single-worker"
-    out["implicitWake"] = False
-    return out
+    no_store = _core_none()
+    descriptor = event_runtime_descriptor_full(routes, options, no_store)
+    return descriptor
 
 
 def mcp_execution_context_descriptor(namespaces: list[Any], inheritance: Any) -> Any:
@@ -185,53 +175,74 @@ def mcp_execution_context_descriptor(namespaces: list[Any], inheritance: Any) ->
     return out
 
 
-def event_route_commands(event: Any, routes: list[Any], identity_scope: str, trust: str) -> list[Any]:
-    _core_coverage_mark("event_route_commands")
-    commands = []
-    event_type = _core_get(event, "type", "")
-    event_source = _core_get(event, "source", "")
-    subject = _core_get(event, "subject", identity_scope)
-    for route in routes:
-        match = _core_get(route, "match", None)
-        types_empty = []
-        sources_empty = []
-        types = _core_get(match, "types", types_empty)
-        sources = _core_get(match, "sources", sources_empty)
-        type_count = _core_len(types)
-        source_count = _core_len(sources)
-        type_open = _core_eq(type_count, 0)
-        source_open = _core_eq(source_count, 0)
-        type_listed = _core_contains(types, event_type)
-        source_listed = _core_contains(sources, event_source)
-        type_match = _core_or(type_open, type_listed)
-        source_match = _core_or(source_open, source_listed)
-        matched = _core_and(type_match, source_match)
-        requires_auth = _core_get(route, "requireAuthenticated", False)
-        authenticated = _core_eq(trust, "authenticated")
-        trusted = _core_eq(trust, "trusted")
-        verified = _core_or(authenticated, trusted)
-        auth_allowed = True
-        if requires_auth:
-            auth_allowed = verified
+def event_store_capability(descriptor: Any) -> Any:
+    _core_coverage_mark("event_store_capability")
+    out = {}
+    missing = _core_is_none(descriptor)
+    if missing:
+        out["ok"] = True
+        out["coordination"] = "single-worker"
+        out["durability"] = "volatile"
+        out["conformant"] = False
+        out["message"] = "no store descriptor; the volatile single-worker store is in use"
+        return out
+    else:
+        pass
+    durability = _core_get(descriptor, "durability", "volatile")
+    claimed = _core_get(descriptor, "coordination", "single-worker")
+    marker = _core_get(descriptor, "conformanceMarker", "")
+    expected_marker = "axevent.store-conformance.v1"
+    marker_ok = _core_eq(marker, expected_marker)
+    wants_multi = _core_eq(claimed, "multi-worker")
+    if wants_multi:
+        marker_missing = _core_not(marker_ok)
+        if marker_missing:
+            out["ok"] = False
+            out["coordination"] = "single-worker"
+            out["durability"] = durability
+            out["conformant"] = False
+            out["message"] = "a store may not claim multi-worker coordination without the axevent.store-conformance.v1 marker"
+            return out
         else:
             pass
-        allowed = _core_and(matched, auth_allowed)
-        if allowed:
-            route_id = _core_get(route, "id", "")
-            action = _core_get(route, "action", "observe")
-            target_id = _core_get(route, "targetId", None)
-            command = {}
-            command["routeId"] = route_id
-            command["action"] = action
-            command["targetId"] = target_id
-            command["instanceKey"] = subject
-            event_id = _core_get(event, "id", "")
-            key = _core_string_format("{}:{}", route_id, event_id)
-            command["idempotencyKey"] = key
-            commands.append(command)
+        persistent = _core_eq(durability, "persistent")
+        not_persistent = _core_not(persistent)
+        if not_persistent:
+            out["ok"] = False
+            out["coordination"] = "single-worker"
+            out["durability"] = durability
+            out["conformant"] = False
+            out["message"] = "multi-worker coordination requires persistent durability"
+            return out
         else:
             pass
-    return commands
+        lease_ms = _core_get(descriptor, "leaseMs", 0)
+        lease_positive = _core_gt(lease_ms, 0)
+        lease_missing = _core_not(lease_positive)
+        if lease_missing:
+            out["ok"] = False
+            out["coordination"] = "single-worker"
+            out["durability"] = durability
+            out["conformant"] = False
+            out["message"] = "multi-worker coordination requires a positive leaseMs"
+            return out
+        else:
+            pass
+        out["ok"] = True
+        out["coordination"] = "multi-worker"
+        out["durability"] = durability
+        out["conformant"] = True
+        out["leaseMs"] = lease_ms
+        out["message"] = "store presents the axevent.store-conformance.v1 marker"
+        return out
+    else:
+        pass
+    out["ok"] = True
+    out["coordination"] = "single-worker"
+    out["durability"] = durability
+    out["conformant"] = marker_ok
+    out["message"] = "store claims single-worker coordination"
+    return out
 
 
 def mcp_protocol_constants() -> Any:
@@ -348,6 +359,187 @@ def mcp_classify_discovery_result(result: Any) -> Any:
     return out
 
 
+def event_lease_transition(now: number, lease: Any, owner: str, lease_ms: number) -> Any:
+    _core_coverage_mark("event_lease_transition")
+    out = {}
+    expires = _core_add(now, lease_ms)
+    absent = _core_is_none(lease)
+    if absent:
+        out["action"] = "claim"
+        out["owner"] = owner
+        out["expiresAt"] = expires
+        out["granted"] = True
+        return out
+    else:
+        pass
+    holder = _core_get(lease, "owner", "")
+    held_until = _core_get(lease, "expiresAt", 0)
+    mine = _core_eq(holder, owner)
+    if mine:
+        out["action"] = "renew"
+        out["owner"] = owner
+        out["expiresAt"] = expires
+        out["granted"] = True
+        return out
+    else:
+        pass
+    expired = _core_lte(held_until, now)
+    if expired:
+        out["action"] = "steal"
+        out["owner"] = owner
+        out["expiresAt"] = expires
+        out["granted"] = True
+        out["previousOwner"] = holder
+        return out
+    else:
+        pass
+    out["action"] = "deny"
+    out["owner"] = holder
+    out["expiresAt"] = held_until
+    out["granted"] = False
+    return out
+
+
+def event_runtime_descriptor_full(routes: list[Any], options: Any, store: Any) -> Any:
+    _core_coverage_mark("event_runtime_descriptor_full")
+    empty = {}
+    missing = _core_is_none(options)
+    opts = options
+    if missing:
+        opts = empty
+    else:
+        pass
+    capability = event_store_capability(store)
+    out = {}
+    out["routes"] = routes
+    out["options"] = opts
+    durability = _core_get(capability, "durability", "volatile")
+    out["durability"] = durability
+    coordination = _core_get(capability, "coordination", "single-worker")
+    out["coordination"] = coordination
+    out["implicitWake"] = False
+    conformant = _core_get(capability, "conformant", False)
+    out["storeConformant"] = conformant
+    capability_ok = _core_get(capability, "ok", True)
+    out["storeAccepted"] = capability_ok
+    capability_message = _core_get(capability, "message", "")
+    out["storeMessage"] = capability_message
+    return out
+
+
+def mcp_resolve_known_era(configured: str, hint: str, cached: str, stored: str) -> Any:
+    _core_coverage_mark("mcp_resolve_known_era")
+    out = {}
+    configured_modern = _core_eq(configured, "modern")
+    configured_legacy = _core_eq(configured, "legacy")
+    configured_known = _core_or(configured_modern, configured_legacy)
+    if configured_known:
+        out["era"] = configured
+        out["probe"] = False
+        return out
+    else:
+        pass
+    hint_modern = _core_eq(hint, "modern")
+    hint_legacy = _core_eq(hint, "legacy")
+    hint_known = _core_or(hint_modern, hint_legacy)
+    if hint_known:
+        out["era"] = hint
+        out["probe"] = False
+        return out
+    else:
+        pass
+    cached_modern = _core_eq(cached, "modern")
+    cached_legacy = _core_eq(cached, "legacy")
+    cached_known = _core_or(cached_modern, cached_legacy)
+    if cached_known:
+        out["era"] = cached
+        out["probe"] = False
+        return out
+    else:
+        pass
+    stored_modern = _core_eq(stored, "modern")
+    stored_legacy = _core_eq(stored, "legacy")
+    stored_known = _core_or(stored_modern, stored_legacy)
+    if stored_known:
+        out["era"] = stored
+        out["probe"] = False
+        return out
+    else:
+        pass
+    out["era"] = "modern"
+    out["probe"] = True
+    return out
+
+
+def event_route_commands(event: Any, routes: list[Any], identity_scope: str, trust: str) -> list[Any]:
+    _core_coverage_mark("event_route_commands")
+    commands = []
+    event_type = _core_get(event, "type", "")
+    event_source = _core_get(event, "source", "")
+    subject = _core_get(event, "subject", identity_scope)
+    for route in routes:
+        match = _core_get(route, "match", None)
+        types_empty = []
+        sources_empty = []
+        types = _core_get(match, "types", types_empty)
+        sources = _core_get(match, "sources", sources_empty)
+        type_count = _core_len(types)
+        source_count = _core_len(sources)
+        type_open = _core_eq(type_count, 0)
+        source_open = _core_eq(source_count, 0)
+        type_listed = _core_contains(types, event_type)
+        source_listed = _core_contains(sources, event_source)
+        type_match = _core_or(type_open, type_listed)
+        source_match = _core_or(source_open, source_listed)
+        matched = _core_and(type_match, source_match)
+        requires_auth = _core_get(route, "requireAuthenticated", False)
+        authenticated = _core_eq(trust, "authenticated")
+        trusted = _core_eq(trust, "trusted")
+        verified = _core_or(authenticated, trusted)
+        auth_allowed = True
+        if requires_auth:
+            auth_allowed = verified
+        else:
+            pass
+        allowed = _core_and(matched, auth_allowed)
+        if allowed:
+            route_id = _core_get(route, "id", "")
+            action = _core_get(route, "action", "observe")
+            target_id = _core_get(route, "targetId", None)
+            command = {}
+            command["routeId"] = route_id
+            command["action"] = action
+            command["targetId"] = target_id
+            command["instanceKey"] = subject
+            event_id = _core_get(event, "id", "")
+            key = _core_string_format("{}:{}", route_id, event_id)
+            command["idempotencyKey"] = key
+            commands.append(command)
+        else:
+            pass
+    return commands
+
+
+def mcp_select_mutual_version(error_data: Any, client_versions: list[Any]) -> str:
+    _core_coverage_mark("mcp_select_mutual_version")
+    is_object = _core_type_is(error_data, "object")
+    if is_object:
+        supported = _core_get(error_data, "supported", None)
+        supported_list = _core_type_is(supported, "list")
+        if supported_list:
+            for version in client_versions:
+                mutual = _core_contains(supported, version)
+                if mutual:
+                    return version
+                else:
+                    pass
+        else:
+            pass
+    else:
+        pass
+    return ""
+
+
 def event_retry_transition(invocation_started: bool, retry_safety: str, attempt: int, max_attempts: int) -> Any:
     _core_coverage_mark("event_retry_transition")
     out = {}
@@ -364,6 +556,37 @@ def event_retry_transition(invocation_started: bool, retry_safety: str, attempt:
         else:
             out["status"] = "outcome_unknown"
             out["retry"] = False
+    else:
+        pass
+    return out
+
+
+def mcp_build_request_meta(existing: Any, protocol_version: str, client_capabilities: Any, client_info: Any, log_level: str, traceparent: str, tracestate: str) -> Any:
+    _core_coverage_mark("mcp_build_request_meta")
+    empty = {}
+    out = empty
+    existing_object = _core_type_is(existing, "object")
+    if existing_object:
+        out = _core_map_merge(empty, existing)
+    else:
+        pass
+    out["io.modelcontextprotocol/protocolVersion"] = protocol_version
+    out["io.modelcontextprotocol/clientCapabilities"] = client_capabilities
+    out["io.modelcontextprotocol/clientInfo"] = client_info
+    log_missing = _core_is_none(log_level)
+    has_log = _core_not(log_missing)
+    if has_log:
+        out["io.modelcontextprotocol/logLevel"] = log_level
+    else:
+        pass
+    has_traceparent = _core_truthy(traceparent)
+    if has_traceparent:
+        out["traceparent"] = traceparent
+    else:
+        pass
+    has_tracestate = _core_truthy(tracestate)
+    if has_tracestate:
+        out["tracestate"] = tracestate
     else:
         pass
     return out
@@ -437,47 +660,70 @@ def event_resolve_path(ingress: Any, path: Any, continuation: Any) -> Any:
     return current
 
 
-def mcp_resolve_known_era(configured: str, hint: str, cached: str, stored: str) -> Any:
-    _core_coverage_mark("mcp_resolve_known_era")
+def mcp_client_capabilities(has_roots: bool, has_sampling: bool, has_elicitation: bool, era: str, tasks_extension: bool) -> Any:
+    _core_coverage_mark("mcp_client_capabilities")
     out = {}
-    configured_modern = _core_eq(configured, "modern")
-    configured_legacy = _core_eq(configured, "legacy")
-    configured_known = _core_or(configured_modern, configured_legacy)
-    if configured_known:
-        out["era"] = configured
-        out["probe"] = False
-        return out
+    if has_roots:
+        roots = {}
+        roots["listChanged"] = True
+        out["roots"] = roots
     else:
         pass
-    hint_modern = _core_eq(hint, "modern")
-    hint_legacy = _core_eq(hint, "legacy")
-    hint_known = _core_or(hint_modern, hint_legacy)
-    if hint_known:
-        out["era"] = hint
-        out["probe"] = False
-        return out
+    if has_sampling:
+        sampling = {}
+        sampling_context = {}
+        sampling_tools = {}
+        sampling["context"] = sampling_context
+        sampling["tools"] = sampling_tools
+        out["sampling"] = sampling
     else:
         pass
-    cached_modern = _core_eq(cached, "modern")
-    cached_legacy = _core_eq(cached, "legacy")
-    cached_known = _core_or(cached_modern, cached_legacy)
-    if cached_known:
-        out["era"] = cached
-        out["probe"] = False
-        return out
+    if has_elicitation:
+        elicitation = {}
+        elicitation_form = {}
+        elicitation_url = {}
+        elicitation["form"] = elicitation_form
+        elicitation["url"] = elicitation_url
+        out["elicitation"] = elicitation
     else:
         pass
-    stored_modern = _core_eq(stored, "modern")
-    stored_legacy = _core_eq(stored, "legacy")
-    stored_known = _core_or(stored_modern, stored_legacy)
-    if stored_known:
-        out["era"] = stored
-        out["probe"] = False
-        return out
+    modern = _core_eq(era, "modern")
+    add_tasks = _core_and(modern, tasks_extension)
+    if add_tasks:
+        extensions = {}
+        tasks = {}
+        extensions["io.modelcontextprotocol/tasks"] = tasks
+        out["extensions"] = extensions
     else:
         pass
-    out["era"] = "modern"
-    out["probe"] = True
+    return out
+
+
+def mcp_negotiate_extensions(client_ext: Any, server_ext: Any) -> Any:
+    _core_coverage_mark("mcp_negotiate_extensions")
+    out = {}
+    client_object = _core_type_is(client_ext, "object")
+    server_object = _core_type_is(server_ext, "object")
+    both_objects = _core_and(client_object, server_object)
+    if both_objects:
+        names = _core_map_keys(client_ext)
+        for name in names:
+            server_has = _core_map_contains(server_ext, name)
+            if server_has:
+                client_value = _core_get(client_ext, name, None)
+                server_value = _core_get(server_ext, name, None)
+                client_value_object = _core_type_is(client_value, "object")
+                server_value_object = _core_type_is(server_value, "object")
+                values_objects = _core_and(client_value_object, server_value_object)
+                if values_objects:
+                    merged = _core_map_merge(client_value, server_value)
+                    out[name] = merged
+                else:
+                    out[name] = server_value
+            else:
+                pass
+    else:
+        pass
     return out
 
 
@@ -536,19 +782,30 @@ def event_map_input(ingress: Any, plan: Any, signature_fields: list[Any], contin
     return result
 
 
-def mcp_select_mutual_version(error_data: Any, client_versions: list[Any]) -> str:
-    _core_coverage_mark("mcp_select_mutual_version")
-    is_object = _core_type_is(error_data, "object")
-    if is_object:
-        supported = _core_get(error_data, "supported", None)
-        supported_list = _core_type_is(supported, "list")
-        if supported_list:
-            for version in client_versions:
-                mutual = _core_contains(supported, version)
-                if mutual:
-                    return version
-                else:
-                    pass
+def mcp_request_name(method: str, params: Any) -> str:
+    _core_coverage_mark("mcp_request_name")
+    params_object = _core_type_is(params, "object")
+    if params_object:
+        tools_call = _core_eq(method, "tools/call")
+        prompts_get = _core_eq(method, "prompts/get")
+        named = _core_or(tools_call, prompts_get)
+        if named:
+            name = _core_get(params, "name", "")
+            name_string = _core_type_is(name, "string")
+            if name_string:
+                return name
+            else:
+                pass
+        else:
+            pass
+        resources_read = _core_eq(method, "resources/read")
+        if resources_read:
+            uri = _core_get(params, "uri", "")
+            uri_string = _core_type_is(uri, "string")
+            if uri_string:
+                return uri
+            else:
+                pass
         else:
             pass
     else:
@@ -556,34 +813,20 @@ def mcp_select_mutual_version(error_data: Any, client_versions: list[Any]) -> st
     return ""
 
 
-def mcp_build_request_meta(existing: Any, protocol_version: str, client_capabilities: Any, client_info: Any, log_level: str, traceparent: str, tracestate: str) -> Any:
-    _core_coverage_mark("mcp_build_request_meta")
-    empty = {}
-    out = empty
-    existing_object = _core_type_is(existing, "object")
-    if existing_object:
-        out = _core_map_merge(empty, existing)
+def mcp_header_value_plan(value: str) -> Any:
+    _core_coverage_mark("mcp_header_value_plan")
+    out = {}
+    edge_space = _core_regex_match("^[\\t ]|[\\t ]$", value)
+    sentinel_prefix = _core_string_starts_with(value, "=?base64?")
+    sentinel_suffix = _core_string_ends_with(value, "?=")
+    sentinel = _core_and(sentinel_prefix, sentinel_suffix)
+    unsafe_octet = _core_regex_match("[^\\t -~]", value)
+    edge_or_sentinel = _core_or(edge_space, sentinel)
+    encode = _core_or(edge_or_sentinel, unsafe_octet)
+    if encode:
+        out["mode"] = "encode"
     else:
-        pass
-    out["io.modelcontextprotocol/protocolVersion"] = protocol_version
-    out["io.modelcontextprotocol/clientCapabilities"] = client_capabilities
-    out["io.modelcontextprotocol/clientInfo"] = client_info
-    log_missing = _core_is_none(log_level)
-    has_log = _core_not(log_missing)
-    if has_log:
-        out["io.modelcontextprotocol/logLevel"] = log_level
-    else:
-        pass
-    has_traceparent = _core_truthy(traceparent)
-    if has_traceparent:
-        out["traceparent"] = traceparent
-    else:
-        pass
-    has_tracestate = _core_truthy(tracestate)
-    if has_tracestate:
-        out["tracestate"] = tracestate
-    else:
-        pass
+        out["mode"] = "plain"
     return out
 
 
@@ -620,220 +863,6 @@ def event_normalize_input(input: Any, signature_fields: list[Any]) -> Any:
     else:
         pass
     return result
-
-
-def mcp_client_capabilities(has_roots: bool, has_sampling: bool, has_elicitation: bool, era: str, tasks_extension: bool) -> Any:
-    _core_coverage_mark("mcp_client_capabilities")
-    out = {}
-    if has_roots:
-        roots = {}
-        roots["listChanged"] = True
-        out["roots"] = roots
-    else:
-        pass
-    if has_sampling:
-        sampling = {}
-        sampling_context = {}
-        sampling_tools = {}
-        sampling["context"] = sampling_context
-        sampling["tools"] = sampling_tools
-        out["sampling"] = sampling
-    else:
-        pass
-    if has_elicitation:
-        elicitation = {}
-        elicitation_form = {}
-        elicitation_url = {}
-        elicitation["form"] = elicitation_form
-        elicitation["url"] = elicitation_url
-        out["elicitation"] = elicitation
-    else:
-        pass
-    modern = _core_eq(era, "modern")
-    add_tasks = _core_and(modern, tasks_extension)
-    if add_tasks:
-        extensions = {}
-        tasks = {}
-        extensions["io.modelcontextprotocol/tasks"] = tasks
-        out["extensions"] = extensions
-    else:
-        pass
-    return out
-
-
-def event_continuation_match(continuations: list[Any], identity_scope: str, kind: str, value: str, now: float) -> Any:
-    _core_coverage_mark("event_continuation_match")
-    result = _core_none()
-    for continuation in continuations:
-        scope = _core_get(continuation, "identityScope", "")
-        scope_match = _core_eq(scope, identity_scope)
-        expires = _core_get(continuation, "expiresAt", None)
-        no_expiry = _core_is_none(expires)
-        active = no_expiry
-        if no_expiry:
-            pass
-        else:
-            active = _core_lt(now, expires)
-        correlations_empty = []
-        correlations = _core_get(continuation, "correlation", correlations_empty)
-        for correlation in correlations:
-            candidate_kind = _core_get(correlation, "kind", "")
-            candidate_value = _core_get(correlation, "value", "")
-            kind_match = _core_eq(candidate_kind, kind)
-            value_match = _core_eq(candidate_value, value)
-            key_match = _core_and(kind_match, value_match)
-            scope_active = _core_and(scope_match, active)
-            match = _core_and(scope_active, key_match)
-            if match:
-                result = continuation
-            else:
-                pass
-    return result
-
-
-def mcp_negotiate_extensions(client_ext: Any, server_ext: Any) -> Any:
-    _core_coverage_mark("mcp_negotiate_extensions")
-    out = {}
-    client_object = _core_type_is(client_ext, "object")
-    server_object = _core_type_is(server_ext, "object")
-    both_objects = _core_and(client_object, server_object)
-    if both_objects:
-        names = _core_map_keys(client_ext)
-        for name in names:
-            server_has = _core_map_contains(server_ext, name)
-            if server_has:
-                client_value = _core_get(client_ext, name, None)
-                server_value = _core_get(server_ext, name, None)
-                client_value_object = _core_type_is(client_value, "object")
-                server_value_object = _core_type_is(server_value, "object")
-                values_objects = _core_and(client_value_object, server_value_object)
-                if values_objects:
-                    merged = _core_map_merge(client_value, server_value)
-                    out[name] = merged
-                else:
-                    out[name] = server_value
-            else:
-                pass
-    else:
-        pass
-    return out
-
-
-def event_delivery_due(status: str, available_at: float, now: float) -> bool:
-    _core_coverage_mark("event_delivery_due")
-    queued = _core_eq(status, "queued")
-    ready = _core_lte(available_at, now)
-    due = _core_and(queued, ready)
-    return due
-
-
-def mcp_request_name(method: str, params: Any) -> str:
-    _core_coverage_mark("mcp_request_name")
-    params_object = _core_type_is(params, "object")
-    if params_object:
-        tools_call = _core_eq(method, "tools/call")
-        prompts_get = _core_eq(method, "prompts/get")
-        named = _core_or(tools_call, prompts_get)
-        if named:
-            name = _core_get(params, "name", "")
-            name_string = _core_type_is(name, "string")
-            if name_string:
-                return name
-            else:
-                pass
-        else:
-            pass
-        resources_read = _core_eq(method, "resources/read")
-        if resources_read:
-            uri = _core_get(params, "uri", "")
-            uri_string = _core_type_is(uri, "string")
-            if uri_string:
-                return uri
-            else:
-                pass
-        else:
-            pass
-    else:
-        pass
-    return ""
-
-
-def event_strict_delivery_eligible(candidate: Any, deliveries: list[Any]) -> bool:
-    _core_coverage_mark("event_strict_delivery_eligible")
-    ordering = _core_get(candidate, "ordering", "strict")
-    strict = _core_eq(ordering, "strict")
-    eligible = True
-    if strict:
-        candidate_sequence = _core_get(candidate, "sequence", 0)
-        candidate_target = _core_get(candidate, "targetId", "")
-        candidate_instance = _core_get(candidate, "instanceKey", "")
-        terminal = []
-        terminal.append("succeeded")
-        terminal.append("failed")
-        terminal.append("cancelled")
-        terminal.append("dead_lettered")
-        terminal.append("output_persistence_failed")
-        terminal.append("outcome_unknown")
-        terminal.append("waiting_event")
-        terminal.append("coalesced")
-        for delivery in deliveries:
-            sequence = _core_get(delivery, "sequence", 0)
-            earlier = _core_lt(sequence, candidate_sequence)
-            target = _core_get(delivery, "targetId", "")
-            instance = _core_get(delivery, "instanceKey", "")
-            same_target = _core_eq(target, candidate_target)
-            same_instance = _core_eq(instance, candidate_instance)
-            same_queue = _core_and(same_target, same_instance)
-            status = _core_get(delivery, "status", "queued")
-            is_terminal = _core_contains(terminal, status)
-            nonterminal = _core_not(is_terminal)
-            predecessor = _core_and(earlier, same_queue)
-            blocking = _core_and(predecessor, nonterminal)
-            if blocking:
-                eligible = False
-            else:
-                pass
-    else:
-        pass
-    return eligible
-
-
-def mcp_header_value_plan(value: str) -> Any:
-    _core_coverage_mark("mcp_header_value_plan")
-    out = {}
-    edge_space = _core_regex_match("^[\\t ]|[\\t ]$", value)
-    sentinel_prefix = _core_string_starts_with(value, "=?base64?")
-    sentinel_suffix = _core_string_ends_with(value, "?=")
-    sentinel = _core_and(sentinel_prefix, sentinel_suffix)
-    unsafe_octet = _core_regex_match("[^\\t -~]", value)
-    edge_or_sentinel = _core_or(edge_space, sentinel)
-    encode = _core_or(edge_or_sentinel, unsafe_octet)
-    if encode:
-        out["mode"] = "encode"
-    else:
-        out["mode"] = "plain"
-    return out
-
-
-def event_capacity_transition(pending: int, queued_bytes: int, envelope_bytes: int, max_pending: int, max_queued_bytes: int, max_envelope_bytes: int) -> Any:
-    _core_coverage_mark("event_capacity_transition")
-    out = {}
-    next_pending = _core_add(pending, 1)
-    next_bytes = _core_add(queued_bytes, envelope_bytes)
-    pending_ok = _core_lte(next_pending, max_pending)
-    queue_ok = _core_lte(next_bytes, max_queued_bytes)
-    envelope_ok = _core_lte(envelope_bytes, max_envelope_bytes)
-    queue_capacity = _core_and(pending_ok, queue_ok)
-    accepted = _core_and(queue_capacity, envelope_ok)
-    out["accepted"] = accepted
-    out["nextPending"] = next_pending
-    out["nextQueuedBytes"] = next_bytes
-    out["reason"] = "capacity"
-    if envelope_ok:
-        pass
-    else:
-        out["reason"] = "envelope_too_large"
-    return out
 
 
 def mcp_param_header_bindings(input_schema: Any) -> Any:
@@ -985,66 +1014,102 @@ def mcp_param_header_bindings(input_schema: Any) -> Any:
     return bindings
 
 
-def event_debounce_transition(now: float, debounce_ms: float, has_queued_predecessor: bool) -> Any:
-    _core_coverage_mark("event_debounce_transition")
-    out = {}
-    available_at = _core_add(now, debounce_ms)
-    out["availableAt"] = available_at
-    out["coalescePredecessor"] = has_queued_predecessor
-    return out
+def event_continuation_match(continuations: list[Any], identity_scope: str, kind: str, value: str, now: float) -> Any:
+    _core_coverage_mark("event_continuation_match")
+    result = _core_none()
+    for continuation in continuations:
+        scope = _core_get(continuation, "identityScope", "")
+        scope_match = _core_eq(scope, identity_scope)
+        expires = _core_get(continuation, "expiresAt", None)
+        no_expiry = _core_is_none(expires)
+        active = no_expiry
+        if no_expiry:
+            pass
+        else:
+            active = _core_lt(now, expires)
+        correlations_empty = []
+        correlations = _core_get(continuation, "correlation", correlations_empty)
+        for correlation in correlations:
+            candidate_kind = _core_get(correlation, "kind", "")
+            candidate_value = _core_get(correlation, "value", "")
+            kind_match = _core_eq(candidate_kind, kind)
+            value_match = _core_eq(candidate_value, value)
+            key_match = _core_and(kind_match, value_match)
+            scope_active = _core_and(scope_match, active)
+            match = _core_and(scope_active, key_match)
+            if match:
+                result = continuation
+            else:
+                pass
+    return result
 
 
-def event_normalize_mcp(namespace: str, method: str, params: Any) -> Any:
-    _core_coverage_mark("event_normalize_mcp")
+def event_delivery_due(status: str, available_at: float, now: float) -> bool:
+    _core_coverage_mark("event_delivery_due")
+    queued = _core_eq(status, "queued")
+    ready = _core_lte(available_at, now)
+    due = _core_and(queued, ready)
+    return due
+
+
+def event_strict_delivery_eligible(candidate: Any, deliveries: list[Any]) -> bool:
+    _core_coverage_mark("event_strict_delivery_eligible")
+    ordering = _core_get(candidate, "ordering", "strict")
+    strict = _core_eq(ordering, "strict")
+    eligible = True
+    if strict:
+        candidate_sequence = _core_get(candidate, "sequence", 0)
+        candidate_target = _core_get(candidate, "targetId", "")
+        candidate_instance = _core_get(candidate, "instanceKey", "")
+        terminal = []
+        terminal.append("succeeded")
+        terminal.append("failed")
+        terminal.append("cancelled")
+        terminal.append("dead_lettered")
+        terminal.append("output_persistence_failed")
+        terminal.append("outcome_unknown")
+        terminal.append("waiting_event")
+        terminal.append("coalesced")
+        for delivery in deliveries:
+            sequence = _core_get(delivery, "sequence", 0)
+            earlier = _core_lt(sequence, candidate_sequence)
+            target = _core_get(delivery, "targetId", "")
+            instance = _core_get(delivery, "instanceKey", "")
+            same_target = _core_eq(target, candidate_target)
+            same_instance = _core_eq(instance, candidate_instance)
+            same_queue = _core_and(same_target, same_instance)
+            status = _core_get(delivery, "status", "queued")
+            is_terminal = _core_contains(terminal, status)
+            nonterminal = _core_not(is_terminal)
+            predecessor = _core_and(earlier, same_queue)
+            blocking = _core_and(predecessor, nonterminal)
+            if blocking:
+                eligible = False
+            else:
+                pass
+    else:
+        pass
+    return eligible
+
+
+def event_capacity_transition(pending: int, queued_bytes: int, envelope_bytes: int, max_pending: int, max_queued_bytes: int, max_envelope_bytes: int) -> Any:
+    _core_coverage_mark("event_capacity_transition")
     out = {}
-    source = _core_string_format("mcp://{}", namespace)
-    out["source"] = source
-    out["type"] = "mcp.notification"
-    out["data"] = params
-    resource = _core_eq(method, "notifications/resources/updated")
-    tools = _core_eq(method, "notifications/tools/list_changed")
-    prompts = _core_eq(method, "notifications/prompts/list_changed")
-    resources = _core_eq(method, "notifications/resources/list_changed")
-    progress = _core_eq(method, "notifications/progress")
-    logging = _core_eq(method, "notifications/message")
-    legacy_task = _core_eq(method, "notifications/tasks/status")
-    modern_task = _core_eq(method, "notifications/tasks")
-    task = _core_or(legacy_task, modern_task)
-    if resource:
-        out["type"] = "mcp.resource.updated"
-    else:
+    next_pending = _core_add(pending, 1)
+    next_bytes = _core_add(queued_bytes, envelope_bytes)
+    pending_ok = _core_lte(next_pending, max_pending)
+    queue_ok = _core_lte(next_bytes, max_queued_bytes)
+    envelope_ok = _core_lte(envelope_bytes, max_envelope_bytes)
+    queue_capacity = _core_and(pending_ok, queue_ok)
+    accepted = _core_and(queue_capacity, envelope_ok)
+    out["accepted"] = accepted
+    out["nextPending"] = next_pending
+    out["nextQueuedBytes"] = next_bytes
+    out["reason"] = "capacity"
+    if envelope_ok:
         pass
-    if tools:
-        out["type"] = "mcp.catalog.changed"
     else:
-        pass
-    if prompts:
-        out["type"] = "mcp.catalog.changed"
-    else:
-        pass
-    if resources:
-        out["type"] = "mcp.catalog.changed"
-    else:
-        pass
-    if progress:
-        out["type"] = "mcp.progress"
-    else:
-        pass
-    if logging:
-        out["type"] = "mcp.logging"
-    else:
-        pass
-    if task:
-        out["type"] = "mcp.task.status"
-        task_value = _core_get(params, "task", params)
-        task_id = _core_get(task_value, "taskId", "")
-        task_key = _core_string_format("{}:{}", namespace, task_id)
-        correlation = {}
-        correlation["kind"] = "mcp.task"
-        correlation["value"] = task_key
-        out["correlation"] = correlation
-    else:
-        pass
+        out["reason"] = "envelope_too_large"
     return out
 
 
@@ -1125,6 +1190,69 @@ def mcp_param_header_values(bindings: Any, arguments: Any) -> Any:
                     out[header_name] = number_text
         else:
             pass
+    return out
+
+
+def event_debounce_transition(now: float, debounce_ms: float, has_queued_predecessor: bool) -> Any:
+    _core_coverage_mark("event_debounce_transition")
+    out = {}
+    available_at = _core_add(now, debounce_ms)
+    out["availableAt"] = available_at
+    out["coalescePredecessor"] = has_queued_predecessor
+    return out
+
+
+def event_normalize_mcp(namespace: str, method: str, params: Any) -> Any:
+    _core_coverage_mark("event_normalize_mcp")
+    out = {}
+    source = _core_string_format("mcp://{}", namespace)
+    out["source"] = source
+    out["type"] = "mcp.notification"
+    out["data"] = params
+    resource = _core_eq(method, "notifications/resources/updated")
+    tools = _core_eq(method, "notifications/tools/list_changed")
+    prompts = _core_eq(method, "notifications/prompts/list_changed")
+    resources = _core_eq(method, "notifications/resources/list_changed")
+    progress = _core_eq(method, "notifications/progress")
+    logging = _core_eq(method, "notifications/message")
+    legacy_task = _core_eq(method, "notifications/tasks/status")
+    modern_task = _core_eq(method, "notifications/tasks")
+    task = _core_or(legacy_task, modern_task)
+    if resource:
+        out["type"] = "mcp.resource.updated"
+    else:
+        pass
+    if tools:
+        out["type"] = "mcp.catalog.changed"
+    else:
+        pass
+    if prompts:
+        out["type"] = "mcp.catalog.changed"
+    else:
+        pass
+    if resources:
+        out["type"] = "mcp.catalog.changed"
+    else:
+        pass
+    if progress:
+        out["type"] = "mcp.progress"
+    else:
+        pass
+    if logging:
+        out["type"] = "mcp.logging"
+    else:
+        pass
+    if task:
+        out["type"] = "mcp.task.status"
+        task_value = _core_get(params, "task", params)
+        task_id = _core_get(task_value, "taskId", "")
+        task_key = _core_string_format("{}:{}", namespace, task_id)
+        correlation = {}
+        correlation["kind"] = "mcp.task"
+        correlation["value"] = task_key
+        out["correlation"] = correlation
+    else:
+        pass
     return out
 
 
@@ -1249,8 +1377,8 @@ def mcp_validate_modern_task(task: Any) -> bool:
     return False
 
 
-def mcp_server_request_plan(request: Any, roots: Any, has_elicitation: bool) -> Any:
-    _core_coverage_mark("mcp_server_request_plan")
+def mcp_server_request_plan_full(request: Any, roots: Any, has_elicitation: bool, has_sampling: bool) -> Any:
+    _core_coverage_mark("mcp_server_request_plan_full")
     out = {}
     id = _core_get(request, "id", None)
     method = _core_get(request, "method", "")
@@ -1300,6 +1428,48 @@ def mcp_server_request_plan(request: Any, roots: Any, has_elicitation: bool) -> 
         return out
     else:
         pass
+    sampling = _core_eq(method, "sampling/createMessage")
+    if sampling:
+        if has_sampling:
+            sampling_params = _core_get(request, "params", None)
+            sampling_missing = _core_is_none(sampling_params)
+            if sampling_missing:
+                sampling_violation = {}
+                sampling_violation["code"] = -32602
+                sampling_violation["message"] = "MCP protocol violation: sampling/createMessage omitted params"
+                sampling_bad = {}
+                sampling_bad["jsonrpc"] = "2.0"
+                sampling_bad["id"] = id
+                sampling_bad["error"] = sampling_violation
+                out["action"] = "respond"
+                out["response"] = sampling_bad
+                return out
+            else:
+                pass
+            messages = _core_get(sampling_params, "messages", None)
+            messages_array = _core_type_is(messages, "list")
+            messages_missing = _core_not(messages_array)
+            if messages_missing:
+                shape_error = {}
+                shape_error["code"] = -32602
+                shape_error["message"] = "MCP protocol violation: sampling/createMessage requires a messages array"
+                shape_response = {}
+                shape_response["jsonrpc"] = "2.0"
+                shape_response["id"] = id
+                shape_response["error"] = shape_error
+                out["action"] = "respond"
+                out["response"] = shape_response
+                return out
+            else:
+                pass
+            out["action"] = "sampling"
+            out["id"] = id
+            out["params"] = sampling_params
+            return out
+        else:
+            pass
+    else:
+        pass
     error = {}
     error["code"] = -32601
     message = _core_string_format("Unsupported server request: {}", method)
@@ -1310,6 +1480,587 @@ def mcp_server_request_plan(request: Any, roots: Any, has_elicitation: bool) -> 
     response["error"] = error
     out["action"] = "respond"
     out["response"] = response
+    return out
+
+
+def mcp_server_request_plan(request: Any, roots: Any, has_elicitation: bool) -> Any:
+    _core_coverage_mark("mcp_server_request_plan")
+    no_sampling = False
+    plan = mcp_server_request_plan_full(request, roots, has_elicitation, no_sampling)
+    return plan
+
+
+def mcp_app_tool_meta(tool: Any) -> Any:
+    _core_coverage_mark("mcp_app_tool_meta")
+    out = {}
+    meta = _core_get(tool, "_meta", None)
+    ui = _core_get(meta, "ui", None)
+    ui_object = _core_type_is(ui, "object")
+    resource_uri = ""
+    visibility = []
+    has_visibility = False
+    if ui_object:
+        nested_uri = _core_get(ui, "resourceUri", "")
+        nested_uri_string = _core_type_is(nested_uri, "string")
+        if nested_uri_string:
+            resource_uri = str(nested_uri).strip("\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+        else:
+            pass
+        nested_visibility = _core_get(ui, "visibility", None)
+        visibility_list = _core_type_is(nested_visibility, "list")
+        if visibility_list:
+            has_visibility = True
+            for principal in nested_visibility:
+                is_model = _core_eq(principal, "model")
+                is_app = _core_eq(principal, "app")
+                known = _core_or(is_model, is_app)
+                if known:
+                    visibility.append(principal)
+                else:
+                    pass
+        else:
+            pass
+    else:
+        pass
+    uri_empty = _core_eq(resource_uri, "")
+    if uri_empty:
+        flat_uri = _core_get(meta, "ui/resourceUri", "")
+        flat_uri_string = _core_type_is(flat_uri, "string")
+        if flat_uri_string:
+            resource_uri = str(flat_uri).strip("\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+        else:
+            pass
+    else:
+        pass
+    out["resourceUri"] = resource_uri
+    out["visibility"] = visibility
+    out["hasVisibility"] = has_visibility
+    return out
+
+
+def mcp_app_tool_visible_to(tool: Any, principal: str) -> bool:
+    _core_coverage_mark("mcp_app_tool_visible_to")
+    meta = mcp_app_tool_meta(tool)
+    declared = _core_get(meta, "hasVisibility", False)
+    visible = True
+    if declared:
+        visibility = _core_get(meta, "visibility", None)
+        visible = _core_contains(visibility, principal)
+    else:
+        pass
+    return visible
+
+
+def mcp_app_resource_policy(meta: Any) -> Any:
+    _core_coverage_mark("mcp_app_resource_policy")
+    out = {}
+    csp = _core_get(meta, "csp", None)
+    resource_domains = _core_get(csp, "resourceDomains", None)
+    connect_domains = _core_get(csp, "connectDomains", None)
+    frame_domains = _core_get(csp, "frameDomains", None)
+    base_domains = _core_get(csp, "baseUriDomains", None)
+    resources = mcp_app_csp_source_list(resource_domains)
+    resources_ok = _core_get(resources, "ok", False)
+    resources_bad = _core_not(resources_ok)
+    if resources_bad:
+        return resources
+    else:
+        pass
+    connect = mcp_app_csp_source_list(connect_domains)
+    connect_ok = _core_get(connect, "ok", False)
+    connect_bad = _core_not(connect_ok)
+    if connect_bad:
+        return connect
+    else:
+        pass
+    frames = mcp_app_csp_source_list(frame_domains)
+    frames_ok = _core_get(frames, "ok", False)
+    frames_bad = _core_not(frames_ok)
+    if frames_bad:
+        return frames
+    else:
+        pass
+    bases = mcp_app_csp_source_list(base_domains)
+    bases_ok = _core_get(bases, "ok", False)
+    bases_bad = _core_not(bases_ok)
+    if bases_bad:
+        return bases
+    else:
+        pass
+    resource_value = _core_get(resources, "value", "")
+    connect_value = _core_get(connect, "value", "")
+    frame_value = _core_get(frames, "value", "")
+    base_value = _core_get(bases, "value", "")
+    resource_suffix = ""
+    resource_present = _core_ne(resource_value, "")
+    if resource_present:
+        resource_suffix = _core_string_format(" {}", resource_value)
+    else:
+        pass
+    directives = []
+    directives.append("default-src 'none'")
+    script_src = _core_string_format("script-src 'self' 'unsafe-inline'{}", resource_suffix)
+    directives.append(script_src)
+    style_src = _core_string_format("style-src 'self' 'unsafe-inline'{}", resource_suffix)
+    directives.append(style_src)
+    connect_src = "connect-src 'none'"
+    connect_present = _core_ne(connect_value, "")
+    if connect_present:
+        connect_src = _core_string_format("connect-src 'self' {}", connect_value)
+    else:
+        pass
+    directives.append(connect_src)
+    img_src = _core_string_format("img-src 'self' data:{}", resource_suffix)
+    directives.append(img_src)
+    font_src = _core_string_format("font-src 'self'{}", resource_suffix)
+    directives.append(font_src)
+    media_src = _core_string_format("media-src 'self' data:{}", resource_suffix)
+    directives.append(media_src)
+    frame_src = "frame-src 'none'"
+    frame_present = _core_ne(frame_value, "")
+    if frame_present:
+        frame_src = _core_string_format("frame-src {}", frame_value)
+    else:
+        pass
+    directives.append(frame_src)
+    directives.append("object-src 'none'")
+    base_uri = "base-uri 'self'"
+    base_present = _core_ne(base_value, "")
+    if base_present:
+        base_uri = _core_string_format("base-uri {}", base_value)
+    else:
+        pass
+    directives.append(base_uri)
+    policy = _core_string_join("; ", directives)
+    permissions = _core_get(meta, "permissions", None)
+    granted = []
+    camera = _core_get(permissions, "camera", None)
+    camera_present = _core_is_not_none(camera)
+    if camera_present:
+        granted.append("camera")
+    else:
+        pass
+    microphone = _core_get(permissions, "microphone", None)
+    microphone_present = _core_is_not_none(microphone)
+    if microphone_present:
+        granted.append("microphone")
+    else:
+        pass
+    geolocation = _core_get(permissions, "geolocation", None)
+    geolocation_present = _core_is_not_none(geolocation)
+    if geolocation_present:
+        granted.append("geolocation")
+    else:
+        pass
+    clipboard = _core_get(permissions, "clipboardWrite", None)
+    clipboard_present = _core_is_not_none(clipboard)
+    if clipboard_present:
+        granted.append("clipboard-write")
+    else:
+        pass
+    permission_policy = _core_string_join("; ", granted)
+    out["ok"] = True
+    out["sandbox"] = "allow-scripts allow-same-origin"
+    out["contentSecurityPolicy"] = policy
+    out["permissionPolicy"] = permission_policy
+    return out
+
+
+def mcp_app_csp_source_list(values: Any) -> Any:
+    _core_coverage_mark("mcp_app_csp_source_list")
+    out = {}
+    parts = []
+    is_list = _core_type_is(values, "list")
+    if is_list:
+        for value in values:
+            value_string = _core_type_is(value, "string")
+            value_invalid = _core_not(value_string)
+            if value_invalid:
+                out["ok"] = False
+                out["message"] = "Unsafe MCP App CSP source: not a string"
+                return out
+            else:
+                pass
+            unsafe = _core_regex_match("[\\s;'\"`]", value)
+            if unsafe:
+                out["ok"] = False
+                unsafe_message = _core_string_format("Unsafe MCP App CSP source: {}", value)
+                out["message"] = unsafe_message
+                return out
+            else:
+                pass
+            lowered = _core_string_lower(value)
+            allowed = _core_regex_match("^(?:https|wss)://(?:\\*\\.)?[a-z0-9.-]+(?::[0-9]+)?$", lowered)
+            not_allowed = _core_not(allowed)
+            if not_allowed:
+                out["ok"] = False
+                scheme_message = _core_string_format("Unsafe MCP App CSP source: {}", value)
+                out["message"] = scheme_message
+                return out
+            else:
+                pass
+            parts.append(value)
+    else:
+        pass
+    joined = _core_string_join(" ", parts)
+    out["ok"] = True
+    out["value"] = joined
+    return out
+
+
+def mcp_app_resource_plan(tool_name: str, uri: str, mime_type: str, html: str, meta: Any) -> Any:
+    _core_coverage_mark("mcp_app_resource_plan")
+    out = {}
+    ui_scheme = _core_string_starts_with(uri, "ui://")
+    bad_scheme = _core_not(ui_scheme)
+    if bad_scheme:
+        out["ok"] = False
+        scheme_message = _core_string_format("MCP App tool {} has no valid ui:// resource", tool_name)
+        out["message"] = scheme_message
+        return out
+    else:
+        pass
+    expected_mime = "text/html;profile=mcp-app"
+    mime_ok = _core_eq(mime_type, expected_mime)
+    mime_bad = _core_not(mime_ok)
+    if mime_bad:
+        out["ok"] = False
+        mime_message = _core_string_format("MCP App resource {} has invalid MIME type {}", uri, mime_type)
+        out["message"] = mime_message
+        return out
+    else:
+        pass
+    lowered = _core_string_lower(html)
+    is_document = _core_regex_match("<(?:!doctype\\s+html|html)(?:\\s|>)", lowered)
+    not_document = _core_not(is_document)
+    if not_document:
+        out["ok"] = False
+        html_message = _core_string_format("MCP App resource {} is not an HTML document", uri)
+        out["message"] = html_message
+        return out
+    else:
+        pass
+    policy = mcp_app_resource_policy(meta)
+    policy_ok = _core_get(policy, "ok", False)
+    policy_bad = _core_not(policy_ok)
+    if policy_bad:
+        return policy
+    else:
+        pass
+    resource = {}
+    resource["uri"] = uri
+    resource["mimeType"] = expected_mime
+    resource["html"] = html
+    resource["meta"] = meta
+    sandbox = _core_get(policy, "sandbox", "")
+    resource["sandbox"] = sandbox
+    csp = _core_get(policy, "contentSecurityPolicy", "")
+    resource["contentSecurityPolicy"] = csp
+    permission_policy = _core_get(policy, "permissionPolicy", "")
+    resource["permissionPolicy"] = permission_policy
+    out["ok"] = True
+    out["resource"] = resource
+    return out
+
+
+def mcp_app_view_message_plan(message: Any, initialized: bool, context: Any) -> Any:
+    _core_coverage_mark("mcp_app_view_message_plan")
+    out = {}
+    has_method = _core_map_contains(message, "method")
+    no_method = _core_not(has_method)
+    if no_method:
+        out["action"] = "ignore"
+        out["reason"] = "not a request or notification"
+        return out
+    else:
+        pass
+    method = _core_get(message, "method", "")
+    id = _core_get(message, "id", None)
+    params = _core_get(message, "params", None)
+    is_request = _core_map_contains(message, "id")
+    is_notification = _core_not(is_request)
+    if is_notification:
+        initialized_notification = _core_eq(method, "ui/notifications/initialized")
+        if initialized_notification:
+            out["action"] = "initialized"
+            return out
+        else:
+            pass
+        uninitialized = _core_not(initialized)
+        if uninitialized:
+            out["action"] = "error"
+            out["reason"] = "MCP App sent a notification before initialization"
+            return out
+        else:
+            pass
+        reserved = _core_string_starts_with(method, "ui/notifications/sandbox-")
+        if reserved:
+            out["action"] = "error"
+            reserved_message = _core_string_format("Reserved MCP App sandbox message: {}", method)
+            out["reason"] = reserved_message
+            return out
+        else:
+            pass
+        log_notification = _core_eq(method, "notifications/message")
+        if log_notification:
+            out["action"] = "log"
+            out["params"] = params
+            return out
+        else:
+            pass
+        size_notification = _core_eq(method, "ui/notifications/size-changed")
+        if size_notification:
+            width = _core_get(params, "width", None)
+            height = _core_get(params, "height", None)
+            width_number = _core_type_is(width, "number")
+            height_number = _core_type_is(height, "number")
+            size_valid = _core_and(width_number, height_number)
+            if size_valid:
+                out["action"] = "size-changed"
+                size = {}
+                size["width"] = width
+                size["height"] = height
+                out["size"] = size
+                return out
+            else:
+                pass
+            out["action"] = "ignore"
+            out["reason"] = "size-changed without numeric width and height"
+            return out
+        else:
+            pass
+        out["action"] = "ignore"
+        out["reason"] = method
+        return out
+    else:
+        pass
+    out["id"] = id
+    initialize_request = _core_eq(method, "ui/initialize")
+    if initialize_request:
+        result = {}
+        result["protocolVersion"] = "2026-01-26"
+        host_capabilities = _core_get(context, "hostCapabilities", None)
+        capabilities_object = _core_type_is(host_capabilities, "object")
+        if capabilities_object:
+            result["hostCapabilities"] = host_capabilities
+        else:
+            default_capabilities = {}
+            server_tools = {}
+            server_tools["listChanged"] = True
+            default_capabilities["serverTools"] = server_tools
+            server_resources = {}
+            server_resources["listChanged"] = True
+            default_capabilities["serverResources"] = server_resources
+            logging = {}
+            default_capabilities["logging"] = logging
+            sandbox = {}
+            default_capabilities["sandbox"] = sandbox
+            result["hostCapabilities"] = default_capabilities
+        host_context = _core_get(context, "hostContext", None)
+        context_object = _core_type_is(host_context, "object")
+        if context_object:
+            result["hostContext"] = host_context
+        else:
+            empty_context = {}
+            result["hostContext"] = empty_context
+        out["action"] = "respond"
+        out["result"] = result
+        return out
+    else:
+        pass
+    uninitialized_request = _core_not(initialized)
+    if uninitialized_request:
+        out["action"] = "error"
+        out["reason"] = "MCP App is not initialized"
+        return out
+    else:
+        pass
+    ping_request = _core_eq(method, "ping")
+    if ping_request:
+        ping_result = {}
+        out["action"] = "respond"
+        out["result"] = ping_result
+        return out
+    else:
+        pass
+    tool_call = _core_eq(method, "tools/call")
+    if tool_call:
+        name = _core_get(params, "name", None)
+        name_string = _core_type_is(name, "string")
+        name_missing = _core_not(name_string)
+        if name_missing:
+            out["action"] = "error"
+            out["reason"] = "Missing tool name"
+            return out
+        else:
+            pass
+        tools = _core_get(context, "tools", None)
+        match = _core_none()
+        tool_list = _core_type_is(tools, "list")
+        if tool_list:
+            for candidate in tools:
+                candidate_name = _core_get(candidate, "name", "")
+                same = _core_eq(candidate_name, name)
+                if same:
+                    match = candidate
+                else:
+                    pass
+        else:
+            pass
+        missing_tool = _core_is_none(match)
+        if missing_tool:
+            out["action"] = "error"
+            unknown_message = _core_string_format("MCP App cannot call tool {}", name)
+            out["reason"] = unknown_message
+            return out
+        else:
+            pass
+        visible = mcp_app_tool_visible_to(match, "app")
+        hidden = _core_not(visible)
+        if hidden:
+            out["action"] = "error"
+            hidden_message = _core_string_format("MCP App cannot call tool {}", name)
+            out["reason"] = hidden_message
+            return out
+        else:
+            pass
+        out["action"] = "call-tool"
+        out["name"] = name
+        arguments = _core_get(params, "arguments", None)
+        arguments_object = _core_type_is(arguments, "object")
+        if arguments_object:
+            out["arguments"] = arguments
+        else:
+            empty_arguments = {}
+            out["arguments"] = empty_arguments
+        return out
+    else:
+        pass
+    resource_read = _core_eq(method, "resources/read")
+    if resource_read:
+        uri = _core_get(params, "uri", None)
+        uri_string = _core_type_is(uri, "string")
+        uri_missing = _core_not(uri_string)
+        if uri_missing:
+            out["action"] = "error"
+            out["reason"] = "Missing resource URI"
+            return out
+        else:
+            pass
+        out["action"] = "read-resource"
+        out["uri"] = uri
+        return out
+    else:
+        pass
+    open_link = _core_eq(method, "ui/open-link")
+    if open_link:
+        url = _core_get(params, "url", None)
+        url_string = _core_type_is(url, "string")
+        url_present = False
+        if url_string:
+            lowered_url = _core_string_lower(url)
+            url_present = _core_regex_match("^https?://", lowered_url)
+        else:
+            pass
+        url_invalid = _core_not(url_present)
+        if url_invalid:
+            out["action"] = "error"
+            out["reason"] = "MCP App link must be HTTP(S)"
+            return out
+        else:
+            pass
+        link_enabled = _core_get(context, "canOpenLink", False)
+        link_disabled = _core_not(link_enabled)
+        if link_disabled:
+            out["action"] = "error"
+            out["reason"] = "Link opening is disabled"
+            return out
+        else:
+            pass
+        out["action"] = "open-link"
+        out["url"] = url
+        return out
+    else:
+        pass
+    app_message = _core_eq(method, "ui/message")
+    if app_message:
+        message_enabled = _core_get(context, "canSendMessage", False)
+        message_disabled = _core_not(message_enabled)
+        if message_disabled:
+            out["action"] = "error"
+            out["reason"] = "App messages are disabled"
+            return out
+        else:
+            pass
+        out["action"] = "send-message"
+        message_params = {}
+        params_object = _core_type_is(params, "object")
+        if params_object:
+            out["params"] = params
+        else:
+            out["params"] = message_params
+        return out
+    else:
+        pass
+    update_context = _core_eq(method, "ui/update-model-context")
+    if update_context:
+        update_enabled = _core_get(context, "canUpdateModelContext", False)
+        update_disabled = _core_not(update_enabled)
+        if update_disabled:
+            out["action"] = "error"
+            out["reason"] = "App model-context updates are disabled"
+            return out
+        else:
+            pass
+        update = {}
+        content = _core_get(params, "content", None)
+        content_present = _core_is_not_none(content)
+        if content_present:
+            update["content"] = content
+        else:
+            pass
+        structured = _core_get(params, "structuredContent", None)
+        structured_present = _core_is_not_none(structured)
+        if structured_present:
+            update["structuredContent"] = structured
+        else:
+            pass
+        update["untrusted"] = True
+        source = {}
+        source["kind"] = "mcp-app"
+        namespace = _core_get(context, "namespace", "")
+        source["namespace"] = namespace
+        tool_name = _core_get(context, "tool", "")
+        source["tool"] = tool_name
+        update["source"] = source
+        out["action"] = "update-model-context"
+        out["update"] = update
+        return out
+    else:
+        pass
+    display_mode = _core_eq(method, "ui/request-display-mode")
+    if display_mode:
+        mode = _core_get(params, "mode", None)
+        inline_mode = _core_eq(mode, "inline")
+        fullscreen_mode = _core_eq(mode, "fullscreen")
+        pip_mode = _core_eq(mode, "pip")
+        windowed = _core_or(inline_mode, fullscreen_mode)
+        mode_valid = _core_or(windowed, pip_mode)
+        mode_invalid = _core_not(mode_valid)
+        if mode_invalid:
+            out["action"] = "error"
+            out["reason"] = "Invalid MCP App display mode"
+            return out
+        else:
+            pass
+        out["action"] = "request-display-mode"
+        out["mode"] = mode
+        return out
+    else:
+        pass
+    out["action"] = "error"
+    unsupported = _core_string_format("Unsupported MCP App request: {}", method)
+    out["reason"] = unsupported
     return out
 
 
@@ -2510,6 +3261,201 @@ def mcp_tool_call_outcome(result: Any, tasks_negotiated: bool) -> Any:
     out["task"] = result
     return out
 
+
+def ucp_signature_components(has_query: bool, has_agent: bool, has_idempotency: bool, has_body: bool) -> list[Any]:
+    _core_coverage_mark("ucp_signature_components")
+    components = []
+    components.append("@method")
+    components.append("@authority")
+    components.append("@path")
+    if has_query:
+        components.append("@query")
+    else:
+        pass
+    if has_agent:
+        components.append("ucp-agent")
+    else:
+        pass
+    if has_idempotency:
+        components.append("idempotency-key")
+    else:
+        pass
+    if has_body:
+        components.append("content-digest")
+        components.append("content-type")
+    else:
+        pass
+    return components
+
+
+def ucp_signature_params(components: list[Any], created: number, key_id: str, algorithm: Any, nonce: Any) -> str:
+    _core_coverage_mark("ucp_signature_params")
+    quoted = []
+    for component in components:
+        quoted_component = _core_string_format("\"{}\"", component)
+        quoted.append(quoted_component)
+    component_list = _core_string_join(" ", quoted)
+    escaped_key = _core_string_replace(key_id, "\"", "\\\"")
+    created_text = _core_json_stringify(created)
+    params = _core_string_format("({});created={};keyid=\"{}\"", component_list, created_text, escaped_key)
+    algorithm_string = _core_type_is(algorithm, "string")
+    if algorithm_string:
+        params = _core_string_format("{};alg=\"{}\"", params, algorithm)
+    else:
+        pass
+    nonce_string = _core_type_is(nonce, "string")
+    if nonce_string:
+        params = _core_string_format("{};nonce=\"{}\"", params, nonce)
+    else:
+        pass
+    return params
+
+
+def ucp_signature_base(components: list[Any], values: Any, params: str) -> str:
+    _core_coverage_mark("ucp_signature_base")
+    lines = []
+    for component in components:
+        value = _core_get(values, component, None)
+        missing = _core_is_none(value)
+        if missing:
+            raise RuntimeError("UCP signature component is missing")
+        else:
+            pass
+        line = _core_string_format("\"{}\": {}", component, value)
+        lines.append(line)
+    params_line = _core_string_format("\"@signature-params\": {}", params)
+    lines.append(params_line)
+    base = _core_string_join("\n", lines)
+    return base
+
+
+def ucp_signature_headers(label: str, params: str, signature: str) -> Any:
+    _core_coverage_mark("ucp_signature_headers")
+    out = {}
+    input_value = _core_string_format("{}={}", label, params)
+    out["Signature-Input"] = input_value
+    signature_value = _core_string_format("{}=:{}:", label, signature)
+    out["Signature"] = signature_value
+    return out
+
+
+def ucp_verify_signature_policy(input: Any, now: number, options: Any) -> Any:
+    _core_coverage_mark("ucp_verify_signature_policy")
+    out = {}
+    out["ok"] = False
+    out["code"] = ""
+    out["message"] = ""
+    present = _core_get(input, "present", False)
+    absent = _core_not(present)
+    if absent:
+        required = _core_get(options, "required", False)
+        if required:
+            out["code"] = "signature_missing"
+            out["message"] = "UCP response signature is required"
+            return out
+        else:
+            pass
+        out["ok"] = True
+        out["code"] = "absent"
+        return out
+    else:
+        pass
+    tolerance = _core_get(options, "clockToleranceSeconds", 60)
+    expires = _core_get(input, "expires", None)
+    has_expires = _core_type_is(expires, "number")
+    if has_expires:
+        expiry_limit = _core_add(expires, tolerance)
+        expired = _core_gt(now, expiry_limit)
+        if expired:
+            out["code"] = "signature_expired"
+            out["message"] = "UCP response signature has expired"
+            return out
+        else:
+            pass
+    else:
+        pass
+    created = _core_get(input, "created", None)
+    has_created = _core_type_is(created, "number")
+    if has_created:
+        future_limit = _core_add(now, tolerance)
+        future = _core_gt(created, future_limit)
+        if future:
+            out["code"] = "signature_invalid"
+            out["message"] = "UCP response signature creation time is in the future"
+            return out
+        else:
+            pass
+    else:
+        pass
+    max_age = _core_get(options, "maxAgeSeconds", None)
+    has_max_age = _core_type_is(max_age, "number")
+    if has_max_age:
+        no_created = _core_not(has_created)
+        if no_created:
+            out["code"] = "signature_expired"
+            out["message"] = "UCP response signature is too old or missing created"
+            return out
+        else:
+            pass
+        age_allowance = _core_add(max_age, tolerance)
+        age_limit = _core_add(created, age_allowance)
+        too_old = _core_gt(now, age_limit)
+        if too_old:
+            out["code"] = "signature_expired"
+            out["message"] = "UCP response signature is too old or missing created"
+            return out
+        else:
+            pass
+    else:
+        pass
+    components = _core_get(input, "components", None)
+    components_list = _core_type_is(components, "list")
+    covers_status = False
+    if components_list:
+        covers_status = _core_contains(components, "@status")
+    else:
+        pass
+    no_status = _core_not(covers_status)
+    if no_status:
+        out["code"] = "signature_invalid"
+        out["message"] = "UCP response signature does not cover @status"
+        return out
+    else:
+        pass
+    has_body = _core_get(input, "hasBody", False)
+    if has_body:
+        covers_digest = False
+        covers_type = False
+        if components_list:
+            covers_digest = _core_contains(components, "content-digest")
+            covers_type = _core_contains(components, "content-type")
+        else:
+            pass
+        covers_body = _core_and(covers_digest, covers_type)
+        body_uncovered = _core_not(covers_body)
+        if body_uncovered:
+            out["code"] = "signature_invalid"
+            out["message"] = "UCP response signature does not cover body digest and content type"
+            return out
+        else:
+            pass
+    else:
+        pass
+    replay_protection = _core_get(options, "replayProtection", False)
+    if replay_protection:
+        seen = _core_get(input, "seen", False)
+        if seen:
+            out["code"] = "signature_replayed"
+            out["message"] = "UCP response signature was replayed"
+            return out
+        else:
+            pass
+    else:
+        pass
+    out["ok"] = True
+    out["code"] = "verified"
+    return out
+
 # END AXIR CORE EMITTED FUNCTIONS
 
 
@@ -3415,8 +4361,8 @@ class AxMCPClient:
     def init(self) -> None:
         if self._initialized:
             return
-        if self.options.get("sampling"):
-            raise AxMCPError("MCP sampling is not supported by the generated Python client")
+        if self.options.get("sampling") and not callable(self.options["sampling"]):
+            raise AxMCPError("MCP sampling requires a callable handler")
         self.transport.connect()
         configured = str(self.options.get("era", "auto"))
         key = self.transport.era_cache_key
@@ -3711,13 +4657,15 @@ class AxMCPClient:
                     outcome.get("inputRequests"),
                     self.options.get("roots"),
                     callable(handler),
-                    False,
+                    callable(self.options.get("sampling")),
                 )
                 if not fulfillment.get("ok"):
                     raise AxMCPError(str(fulfillment.get("message", "MCP protocol violation")))
                 responses = dict(fulfillment.get("responses") or {})
                 for key, pending in (fulfillment.get("pending") or {}).items():
-                    if pending.get("method") != "elicitation/create" or not callable(handler):
+                    handler = {"elicitation/create": self.options.get("elicitation"),
+                               "sampling/createMessage": self.options.get("sampling")}.get(pending.get("method"))
+                    if not callable(handler):
                         raise AxMCPError(f"MCP protocol violation: unsupported pending task input request method {pending.get('method')}")
                     responses[key] = handler(
                         pending.get("params") or {},
@@ -3960,14 +4908,16 @@ class AxMCPClient:
                 roots = self.options.get("roots") if "roots" in self.options else None
                 elicitation = self.options.get("elicitation")
                 has_elicitation = callable(elicitation)
-                fulfillment = mcp_mrtr_plan_fulfillment(requests, roots, has_elicitation, False)
+                fulfillment = mcp_mrtr_plan_fulfillment(requests, roots, has_elicitation, callable(self.options.get("sampling")))
                 if not fulfillment.get("ok"):
                     raise AxMCPError(str(fulfillment.get("message", "MCP protocol violation")))
                 input_responses = dict(fulfillment.get("responses") or {})
                 for key, pending in (fulfillment.get("pending") or {}).items():
-                    if pending.get("method") != "elicitation/create":
+                    handler = {"elicitation/create": elicitation,
+                               "sampling/createMessage": self.options.get("sampling")}.get(pending.get("method"))
+                    if not callable(handler):
                         raise AxMCPError(f"MCP protocol violation: unsupported pending MRTR input request method {pending.get('method')}")
-                    input_responses[key] = elicitation(
+                    input_responses[key] = handler(
                         pending.get("params") or {},
                         {"client": self, "namespace": self.namespace()},
                     )
@@ -4024,10 +4974,12 @@ class AxMCPClient:
     def _client_capabilities(self) -> dict[str, Any]:
         capabilities = dict(self.options.get("capabilities") or {})
         has_elicitation = callable(self.options.get("elicitation"))
-        derived = mcp_client_capabilities(bool(self.options.get("roots")), False, has_elicitation, self.era or "legacy", self.options.get("tasksExtension") is not False)
+        has_sampling = callable(self.options.get("sampling"))
+        derived = mcp_client_capabilities(bool(self.options.get("roots")), has_sampling, has_elicitation, self.era or "legacy", self.options.get("tasksExtension") is not False)
         for key, value in derived.items():
             capabilities.setdefault(key, value)
-        capabilities.pop("sampling", None)
+        if not has_sampling:
+            capabilities.pop("sampling", None)
         if not has_elicitation:
             capabilities.pop("elicitation", None)
         return capabilities
@@ -4067,13 +5019,16 @@ class AxMCPClient:
 
     def _handle_server_request(self, message: dict[str, Any]) -> dict[str, Any]:
         handler = self.options.get("elicitation")
-        plan = mcp_server_request_plan(
+        plan = mcp_server_request_plan_full(
             message,
             self.options.get("roots"),
             callable(handler),
+            callable(self.options.get("sampling")),
         )
         if plan.get("action") == "respond":
             return dict(plan.get("response") or {})
+        if plan.get("action") == "sampling":
+            handler = self.options["sampling"]
         try:
             result = handler(
                 plan.get("params") or {},
@@ -4118,6 +5073,126 @@ class AxMCPClient:
         name = _override_name("resource_template_" + _safe_name(template.get("name", "template")), self.options)
         description = _override_description(template, self.options)
         return Tool(name, description, {"type": "object", "properties": {"uri": {"type": "string"}}}, lambda args: self.read_resource(args["uri"]))
+
+
+class AxMCPAppBridge:
+    """MCP Apps protocol bridge; the host renders the validated resource."""
+
+    def __init__(self, client: AxMCPClient, tool: str | dict[str, Any], options=None):
+        self.client = client
+        self.tool = next((item for item in client.tools if item.get("name") == tool), None) if isinstance(tool, str) else tool
+        if self.tool is None:
+            raise AxMCPError(f"MCP App tool not found: {tool}")
+        self.options = dict(options or {})
+        self.initialized = False
+        self._next_id = 1
+
+    def load_resource(self):
+        uri = mcp_app_tool_meta(self.tool)["resourceUri"]
+        if not uri.startswith("ui://"):
+            raise AxMCPError(f"MCP App tool {self.tool['name']} has no valid ui:// resource")
+        response = self.client.read_resource(uri)
+        item = next((value for value in response.get("contents", []) if value.get("uri") == uri), None)
+        if item is None:
+            raise AxMCPError(f"MCP App resource {uri} was not returned")
+        if "text" in item:
+            html = item["text"]
+        else:
+            try:
+                html = base64.b64decode(item.get("blob", ""), validate=True).decode("utf-8", errors="replace")
+            except (ValueError, TypeError) as error:
+                raise AxMCPError("MCP App resource blob is not valid base64 HTML") from error
+        meta = (item.get("_meta") or {}).get("ui")
+        plan = mcp_app_resource_plan(self.tool["name"], uri, item.get("mimeType", "<missing>"), html,
+                                     json.loads(json.dumps(meta)) if isinstance(meta, dict) else {})
+        if not plan["ok"]:
+            raise AxMCPError(plan["message"])
+        return plan["resource"]
+
+    def handle_view_message(self, message):
+        context = {
+            "namespace": self.client.namespace(), "tool": self.tool["name"], "tools": self.client.tools,
+            "hostCapabilities": self.options.get("hostCapabilities"), "hostContext": self.options.get("hostContext"),
+            "canOpenLink": callable(self.options.get("openLink")),
+            "canSendMessage": callable(self.options.get("sendMessage")),
+            "canUpdateModelContext": callable(self.options.get("updateModelContext")),
+        }
+        try:
+            plan = mcp_app_view_message_plan(message, self.initialized, context)
+            action = plan["action"]
+            if action == "error":
+                raise AxMCPError(plan["reason"])
+            if action == "initialized":
+                self.initialized = True
+                return None
+            if action == "ignore":
+                return None
+            if action in {"log", "size-changed"}:
+                callback = self.options.get("log" if action == "log" else "sizeChanged")
+                if callable(callback):
+                    callback(plan.get("params") if action == "log" else plan["size"])
+                return None
+            result = {}
+            if action == "respond":
+                result = plan["result"]
+            else:
+                authorize = self.options.get("authorize")
+                if callable(authorize) and authorize({"method": action, "params": message.get("params"),
+                                                       "namespace": self.client.namespace(), "tool": self.tool["name"]}) is False:
+                    raise AxMCPError(f"MCP App request denied: {action}")
+                if action == "call-tool":
+                    result = self.client.call_tool(plan["name"], plan["arguments"])
+                elif action == "read-resource":
+                    result = self.client.read_resource(plan["uri"])
+                elif action == "open-link":
+                    self.options["openLink"](plan["url"])
+                elif action == "send-message":
+                    self.options["sendMessage"](plan["params"])
+                elif action == "update-model-context":
+                    self.options["updateModelContext"](plan["update"])
+                elif action == "request-display-mode":
+                    callback = self.options.get("requestDisplayMode")
+                    mode = callback(plan["mode"]) if callable(callback) else "inline"
+                    if mode not in {"inline", "fullscreen", "pip"}:
+                        raise AxMCPError("Invalid MCP App display mode granted by host")
+                    result = {"mode": mode}
+                else:
+                    raise AxMCPError(f"Unknown MCP App action: {action}")
+            return {"jsonrpc": "2.0", "id": message["id"], "result": result}
+        except Exception as error:
+            if "id" not in message:
+                raise
+            return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32000, "message": str(error)}}
+
+    def _notify(self, method, params):
+        if not self.initialized:
+            raise AxMCPError("MCP App is not initialized")
+        callback = self.options.get("sendToView")
+        if callable(callback):
+            callback({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def notify_tool_input(self, arguments):
+        self._notify("ui/notifications/tool-input", {"arguments": arguments})
+
+    def notify_tool_input_partial(self, arguments):
+        self._notify("ui/notifications/tool-input-partial", {"arguments": arguments})
+
+    def notify_tool_result(self, result):
+        self._notify("ui/notifications/tool-result", result)
+
+    def notify_tool_cancelled(self, reason):
+        self._notify("ui/notifications/tool-cancelled", {"reason": reason})
+
+    def notify_host_context_changed(self, context):
+        self._notify("ui/notifications/host-context-changed", context)
+
+    def teardown(self, reason):
+        callback = self.options.get("sendToView")
+        request_id = self._next_id
+        self._next_id += 1
+        if callable(callback):
+            callback({"jsonrpc": "2.0", "id": request_id, "method": "ui/resource-teardown", "params": {"reason": reason}})
+        self.initialized = False
 
 
 class AxMCPEventSource(AxEventSource):
@@ -5486,6 +6561,12 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
         transport = AxMCPScriptedTransport(fixture.get("responses") or fixture.get("transport_responses") or [])
         client_options = dict(fixture.get("client_options") or {})
         elicitation_calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        sampling_calls = []
+        if operation == "server_requests_sampling":
+            def fixture_sampling(params, context):
+                sampling_calls.append((params, context))
+                return dict(fixture["sampling_result"])
+            client_options["sampling"] = fixture_sampling
         if operation in {"mrtr_elicitation", "tasks_v2_input_required", "server_requests_legacy"}:
             def fixture_elicitation(params, context):
                 if params.get("fail"):
@@ -5502,6 +6583,31 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
         client.init()
         if operation != "client_discovery" and fixture.get("expected_protocol_version") and client.negotiated_protocol_version != fixture["expected_protocol_version"]:
             raise AssertionError("protocol version mismatch")
+        if operation == "app_bridge":
+            _run_mcp_app_bridge_fixture(fixture, client, transport)
+            return
+        if operation == "server_requests_sampling":
+            for request in fixture["server_requests"]:
+                transport.emit(request)
+            assert transport.sent_responses == fixture["expected_responses"], transport.sent_responses
+            assert len(sampling_calls) == fixture["expected_handler_calls"], sampling_calls
+            assert sampling_calls[0][0] == fixture["expected_handler_params"], sampling_calls[0][0]
+            assert sampling_calls[0][1]["client"] is client
+            _assert_subset(sampling_calls[0][1], fixture["expected_context"], "sampling context")
+            initialize = next(request for request in transport.requests if request["method"] == "initialize")
+            _assert_subset(initialize["params"]["capabilities"], fixture["expected_capabilities"], "sampling capabilities")
+            plain_transport = AxMCPScriptedTransport(fixture["responses"])
+            plain = AxMCPClient(plain_transport, fixture["client_options"])
+            plain.init()
+            without = fixture["without_handler"]
+            plain_transport.emit(without["server_request"])
+            assert plain_transport.sent_responses == [without["expected_response"]], plain_transport.sent_responses
+            plain_initialize = next(request for request in plain_transport.requests if request["method"] == "initialize")
+            for name in without["forbidden_capabilities"]:
+                assert name not in plain_initialize["params"]["capabilities"], name
+            for case in fixture["legacy_plan_cases"]:
+                assert mcp_server_request_plan(case["request"], None, False) == case["expected"], case
+            return
         if operation == "client_discovery":
             if fixture.get("call_tool"):
                 call = fixture["call_tool"]
@@ -5603,7 +6709,7 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
             try:
                 bad.init()
             except Exception as error:
-                if "sampling is not supported" not in str(error):
+                if "sampling requires a callable handler" not in str(error):
                     raise
             else:
                 raise AssertionError("truthy sampling option was accepted")
@@ -5730,6 +6836,101 @@ def run_mcp_conformance_fixture(fixture: dict[str, Any]) -> None:
         if expected_error and expected_error in str(exc):
             return
         raise
+
+
+def _run_mcp_app_bridge_fixture(fixture, client, transport):
+    sent, links, updates, sizes = [], [], [], []
+    bridge = AxMCPAppBridge(client, fixture["tool"], {
+        "sendToView": sent.append, "openLink": links.append,
+        "updateModelContext": updates.append, "sizeChanged": sizes.append,
+        "requestDisplayMode": lambda _mode: "inline",
+    })
+    tools = {tool["name"]: tool for tool in client.tools}
+    assert mcp_app_tool_meta(tools[fixture["tool"]]) == fixture["expected_tool_meta"]
+    for case in fixture["visibility_cases"]:
+        assert mcp_app_tool_visible_to(tools[case["tool"]], case["principal"]) == case["expected"], case
+    transport.responses.append(fixture["resource_read"])
+    _assert_subset(bridge.load_resource(), fixture["expected_resource"], "App resource")
+
+    def load_content(content):
+        resource_transport = AxMCPScriptedTransport(fixture["responses"] + [
+            {"method": "resources/read", "result": {"contents": [content]}}])
+        resource_client = AxMCPClient(resource_transport, fixture["client_options"])
+        resource_client.init()
+        return AxMCPAppBridge(resource_client, fixture["tool"]).load_resource()
+
+    for case in fixture["invalid_resources"]:
+        try:
+            load_content(case["content"])
+        except AxMCPError as error:
+            assert case["expected_error_contains"] in str(error), str(error)
+        else:
+            raise AssertionError(f"invalid App resource accepted: {case['note']}")
+    blob = fixture["blob_resource"]
+    assert load_content(blob["content"])["html"] == blob["expected_html"]
+    for case in fixture["pre_initialize_cases"]:
+        if "expected_error_contains" in case:
+            try:
+                bridge.handle_view_message(case["message"])
+            except AxMCPError as error:
+                assert case["expected_error_contains"] in str(error), str(error)
+            else:
+                raise AssertionError("pre-initialize notification accepted")
+        else:
+            assert bridge.handle_view_message(case["message"]) == case["expected_response"]
+    assert bridge.handle_view_message(fixture["initialize_message"]) == fixture["expected_initialize_response"]
+    bridge.handle_view_message({"jsonrpc": "2.0", "method": "ui/notifications/initialized"})
+    for case in fixture["request_cases"]:
+        if "response" in case:
+            transport.responses.append(case["response"])
+        request_start, link_start, update_start = len(transport.requests), len(links), len(updates)
+        assert bridge.handle_view_message(case["message"]) == case["expected_response"], case["note"]
+        calls = [request for request in transport.requests[request_start:] if request["method"] == "tools/call"]
+        if "expected_tool_request" in case:
+            assert len(calls) == 1, calls
+            assert calls[0]["params"] == case["expected_tool_request"], calls
+        if "expected_tool_requests" in case:
+            assert len(calls) == case["expected_tool_requests"], calls
+        if "expected_open_links" in case:
+            assert len(links) - link_start == case["expected_open_links"], links
+        if "expected_opened_url" in case:
+            assert links[-1] == case["expected_opened_url"], links
+        if "expected_model_context_update" in case:
+            assert updates[update_start:] == [case["expected_model_context_update"]], updates
+    disabled = AxMCPAppBridge(client, fixture["tool"])
+    disabled.handle_view_message({"jsonrpc": "2.0", "method": "ui/notifications/initialized"})
+    for case in fixture["disabled_cases"]:
+        assert disabled.handle_view_message(case["message"]) == case["expected_response"], case
+    reserved = fixture["reserved_notification"]
+    try:
+        bridge.handle_view_message(reserved["message"])
+    except AxMCPError as error:
+        assert reserved["expected_error_contains"] in str(error), str(error)
+    else:
+        raise AssertionError("reserved sandbox notification accepted")
+    bridge.handle_view_message(fixture["size_notification"]["message"])
+    assert sizes == [fixture["size_notification"]["expected_size"]], sizes
+    sizes.clear()
+    bridge.handle_view_message(fixture["invalid_size_notification"]["message"])
+    assert len(sizes) == fixture["invalid_size_notification"]["expected_sizes"], sizes
+    denied = AxMCPAppBridge(client, fixture["tool"], {"authorize": lambda _action: False})
+    denied.handle_view_message({"jsonrpc": "2.0", "method": "ui/notifications/initialized"})
+    request_start = len(transport.requests)
+    case = fixture["authorize_denied"]
+    assert denied.handle_view_message(case["message"]) == case["expected_response"]
+    assert len(transport.requests) - request_start == case["expected_tool_requests"]
+    bridge.notify_tool_input({"item": "sku-2"})
+    bridge.notify_tool_result({"structuredContent": {"picked": "sku-2"}})
+    assert sent == fixture["expected_notifications"], sent
+    bridge.teardown(fixture["teardown_reason"])
+    _assert_subset(sent[-1], fixture["expected_teardown"], "App teardown")
+    assert sent[-1]["id"] == 1
+    try:
+        bridge.notify_tool_input({})
+    except AxMCPError as error:
+        assert "not initialized" in str(error), str(error)
+    else:
+        raise AssertionError("App still sends notifications after teardown")
 
 
 def _assert_requests(requests: list[dict[str, Any]], fixture: dict[str, Any]) -> None:
