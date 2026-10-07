@@ -672,7 +672,9 @@ languages:
 
         (let ((llm (ax:ai :name "openai" :model "gpt-5.4-mini"
                           :api-key (uiop:getenv "OPENAI_API_KEY")))
-              (classify (ax:ax "review:string -> sentiment:class \"positive, negative, neutral\"")))
+              (classify
+                (ax:ax "review:string ->
+                    sentiment:class \"positive, negative, neutral\"")))
           (ax:forward classify llm
                       (ax:object "review" "This product is amazing!")))
     audio:
@@ -706,7 +708,7 @@ languages:
           (ax:encode-json (ax:json-schema sig :side :output)))
     agent:
       filename: audit.lisp
-      runtimeLabel: JavaScript runtime session
+      runtimeLabel: JS runtime
       status: Illustrative audit result — see the runnable example and measurements
       output: |
         {
@@ -722,15 +724,19 @@ languages:
 
         (let ((llm (ax:ai :name "openai" :model "gpt-5.4-mini"
                           :api-key (uiop:getenv "OPENAI_API_KEY")))
-              (auditor (ax:agent "ledger:json, question:string -> total:number, flagged:string[]"
-                                 :options (ax:object
-                                           ;; ledger stays in the runtime
-                                           "contextFields" (vector "ledger")
-                                           "runtime" (ax:object "language" "JavaScript")))))
+              (auditor
+                (ax:agent "ledger:json, question:string ->
+                           total:number, flagged:string[]"
+                  :options (ax:object
+                             ;; ledger stays in the runtime
+                             "contextFields" (vector "ledger")
+                             "runtime"
+                             (ax:object "language" "JavaScript")))))
           (ax:agent-forward auditor llm
-                            (ax:object "ledger" ledger
-                                       "question" "Total PROJECT-X spend; flag txns over threshold")
-                            :options (ax:object "runtime" engine)))
+            (ax:object "ledger" ledger
+              "question"
+              "Total PROJECT-X spend; flag txns over threshold")
+            :options (ax:object "runtime" engine)))
     provider:
       filename: providers.lisp
       code: |

@@ -133,7 +133,7 @@ Use [Playbooks]({{langRoot}}/concepts/playbook/) when the system should learn du
 
 ## AxIR — Compiled Six-Wide
 
-TypeScript is the behavioral reference runtime. AxIR extracts and lowers the shared semantics into one core model, then emits native {{packageName}}-style APIs for Python, Java, C++, Go, and Rust. The result is not transpiled TypeScript: each package keeps native names, errors, builders, callbacks, transports, and runtime boundaries.
+TypeScript is the behavioral reference runtime. AxIR extracts and lowers the shared semantics into one core model, then emits native {{packageName}}-style APIs for Python, Java, C++, Go, Rust, and Common Lisp. The result is not transpiled TypeScript: each package keeps native names, errors, builders, callbacks, transports, and runtime boundaries.
 
 ```mermaid
 flowchart LR
@@ -144,8 +144,10 @@ flowchart LR
   core --> cpp["C++ package"]
   core --> go["Go package"]
   core --> rust["Rust package"]
+  core --> lisp["Common Lisp package"]
   python --> verify
   rust --> verify
+  lisp --> verify
 ```
 
 `axir verify` compiles targets, runs generated examples, checks capability manifests, and exercises conformance fixtures before a backend earns its place on the site.

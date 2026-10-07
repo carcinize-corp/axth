@@ -826,7 +826,8 @@ function collectQualityFailures(rel, html, failures) {
       'RLM-powered agents',
       'One compiled framework',
       'Open-source AI library',
-      'Native in six languages',
+      'Native in seven languages',
+      'Common Lisp',
     ]) {
       if (!firstFold.includes(proof)) {
         failures.push(`${rel}: homepage first fold missing ${proof}`);

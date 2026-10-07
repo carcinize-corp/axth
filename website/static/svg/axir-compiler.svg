@@ -69,11 +69,12 @@
   </g>
 
   <path class="dash" d="M768 230V282"/>
-  <path class="thin" d="M768 282C698 292 638 312 590 330M768 282C718 296 690 310 664 330M768 282C768 298 752 312 732 330M768 282C810 296 844 312 872 330M768 282C840 292 888 312 922 330"/>
+  <path class="thin" d="M768 282C698 292 638 312 590 330M768 282C718 296 690 310 664 330M768 282C768 298 752 312 732 330M768 282C788 298 796 312 802 330M768 282C810 296 844 312 872 330M768 282C840 292 888 312 922 330"/>
   <g>
     <circle class="soft-blue" cx="590" cy="330" r="22"/><circle class="blue" cx="590" cy="330" r="5"/><text class="small" x="568" y="370" fill="#067ab8">Python</text>
     <circle class="soft-amber" cx="664" cy="330" r="22"/><circle class="amber" cx="664" cy="330" r="5"/><text class="small" x="650" y="370" fill="#a97009">Java</text>
     <circle class="soft-rust" cx="732" cy="330" r="22"/><circle class="rust" cx="732" cy="330" r="5"/><text class="small" x="722" y="370" fill="#b34836">C++</text>
+    <circle class="soft-teal" cx="802" cy="330" r="22"/><circle class="teal" cx="802" cy="330" r="5"/><text class="small" x="802" y="370" text-anchor="middle" fill="#0a8f7a">Common Lisp</text>
     <circle class="soft-green" cx="872" cy="330" r="22"/><circle class="green" cx="872" cy="330" r="5"/><text class="small" x="864" y="370" fill="#0a8852">Go</text>
     <circle class="soft-violet" cx="922" cy="330" r="22"/><circle class="violet" cx="922" cy="330" r="5"/><text class="small" x="910" y="370" fill="#635bff">Rust</text>
   </g>

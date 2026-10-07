@@ -1,6 +1,6 @@
 ---
 title: "Ax"
-description: "Build AI features and agents with DSPy-style programming, RLM agents, and one compiled framework. Native libraries for TypeScript, Python, Java, C++, Go, and Rust."
+description: "Build AI features and agents with DSPy-style programming, RLM agents, and one compiled framework. Native libraries for TypeScript, Python, Java, C++, Go, Rust, and Common Lisp."
 ---
 
 <!-- Shortcode calls must start at column 0: Hugo re-indents shortcode output
@@ -13,12 +13,12 @@ description: "Build AI features and agents with DSPy-style programming, RLM agen
 <div class="home-hero-copy">
   <p class="home-kicker">DSPy-style programming. RLM-powered agents. One compiled framework.</p>
   <h1><span class="home-h1-line">Build AI features</span> <span class="home-h1-line">and agents</span> <span class="home-h1-line">in your app.</span></h1>
-  <p class="home-lede">Define the inputs and outputs. Improve results using examples and evaluations. Build agents that work through data and tools using code. One shared framework brings it all to <strong>TypeScript, Python, Java, C++, Go, and Rust.</strong></p>
+  <p class="home-lede">Define the inputs and outputs. Improve results using examples and evaluations. Build agents that work through data and tools using code. One shared framework brings it all to <strong>TypeScript, Python, Java, C++, Go, Rust, and Common Lisp.</strong></p>
   <div class="home-proof-row" aria-label="Ax highlights">
     <span><i class="home-proof-dot proof-blue" aria-hidden="true"></i>Open-source AI library</span>
     <span><i class="home-proof-dot proof-violet" aria-hidden="true"></i>Validated outputs</span>
     <span><i class="home-proof-dot proof-teal" aria-hidden="true"></i>Cloud and local models</span>
-    <span><i class="home-proof-dot proof-green" aria-hidden="true"></i>Native in six languages</span>
+    <span><i class="home-proof-dot proof-green" aria-hidden="true"></i>Native in seven languages</span>
   </div>
   <div class="home-actions">
     <a href="/typescript/quick-start/" data-home-lang-href="quick-start/">Build your first AI feature</a>
@@ -47,7 +47,7 @@ description: "Build AI features and agents with DSPy-style programming, RLM agen
 </div>
 
 <div class="home-proof-strip" aria-label="Ax libraries and examples">
-  <p><strong>One framework, native in six languages.</strong> Switch the language to see the same task in its native API. Runnable examples, documentation, and package checks are maintained together.</p>
+  <p><strong>One framework, native in seven languages.</strong> Switch the language to see the same task in its native API. Runnable examples, documentation, and package checks are maintained together.</p>
 </div>
 
 <section class="home-section home-foundations" aria-labelledby="why-ax">
@@ -75,8 +75,8 @@ description: "Build AI features and agents with DSPy-style programming, RLM agen
 {{< home-icon "languages" "icon-blue" >}}
     <p class="home-card-eyebrow">One compiled framework</p>
     <h3>Learn once. Use it across your stack.</h3>
-    <p>One shared core brings consistent concepts and checked behavior to TypeScript, Python, Java, C++, Go, and Rust. Native libraries fit each language, so teams can use Ax in the applications they already have.</p>
-    <a class="home-card-link" href="#compiler-ir">How one framework becomes six libraries</a>
+    <p>One shared core brings consistent concepts and checked behavior to TypeScript, Python, Java, C++, Go, Rust, and Common Lisp. Native libraries fit each language, so teams can use Ax in the applications they already have.</p>
+    <a class="home-card-link" href="#compiler-ir">How one framework becomes seven libraries</a>
   </article>
 </div>
 </section>
@@ -387,14 +387,14 @@ A: 9 of 12 churned accounts were on the Starter plan.
   <div><strong>1000+</strong><span>tests</span></div>
   <div><strong>40+</strong><span>OTel metrics</span></div>
   <div><strong>15+</strong><span>LLM providers</span></div>
-  <div><strong>6</strong><span>languages</span></div>
+  <div><strong>7</strong><span>languages</span></div>
 </div>
 <div class="home-card-grid production-grid">
   <article class="home-marketing-card">{{< home-icon "activity" "icon-blue" >}}<h3>Follow a request</h3><p>OpenTelemetry traces connect model calls, tool calls, and agent steps.</p></article>
   <article class="home-marketing-card">{{< home-icon "bar-chart" "icon-teal" >}}<h3>Spot slow or failing steps</h3><p>Track response times, token usage, and errors as your app runs.</p></article>
   <article class="home-marketing-card">{{< home-icon "zap" "icon-violet" >}}<h3>Show results as they arrive</h3><p>Stream output fields and check their format and constraints with validation and retry feedback.</p></article>
   <article class="home-marketing-card">{{< home-icon "dollar" "icon-green" >}}<h3>Track estimated costs</h3><p>See the estimated model cost of a request and compare it with answer quality.</p></article>
-  <article class="home-marketing-card">{{< home-icon "globe" "icon-amber" >}}<h3>Work across your stack</h3><p>Use the shared Ax programming model from each of the six native libraries.</p></article>
+  <article class="home-marketing-card">{{< home-icon "globe" "icon-amber" >}}<h3>Work across your stack</h3><p>Use the shared Ax programming model from each of the seven native libraries.</p></article>
   <article class="home-marketing-card">{{< home-icon "shield" "icon-rust" >}}<h3>Control how requests run</h3><p>Configure rate limits, provider routing, redaction, and error handling for your app.</p></article>
 </div>
 <div class="home-resource-row home-resource-row-tight">
@@ -414,7 +414,7 @@ A: 9 of 12 churned accounts were on the Starter plan.
 <div class="home-section-heading">
   <p class="home-section-label">AxIR compiler</p>
   <h2 id="compiler-ir">One framework, compiled into native libraries.</h2>
-  <p>TypeScript is the reference runtime. The AxIR compiler represents shared Ax behavior in a portable intermediate representation and emits native libraries for Python, Java, C++, Go, and Rust. Each library uses its language’s own names, errors, and builders, with shared checks for supported behavior.</p>
+  <p>TypeScript is the reference runtime. The AxIR compiler represents shared Ax behavior in a portable intermediate representation and emits native libraries for Python, Java, C++, Go, Rust, and Common Lisp. Each library uses its language’s own names, errors, and builders, with shared checks for supported behavior.</p>
 </div>
 <div class="home-resource-row home-resource-row-tight">
   <div>
