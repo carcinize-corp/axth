@@ -197,8 +197,8 @@ describe('AxIR CI scope', () => {
     );
     for (const language of languages) {
       if (language === 'lisp') {
-        // Lisp emits a Core subset, not a full axir verify target. Its own
-        // workflow must cover source changes, shared fixtures and freshness.
+        // Lisp is verified in its dedicated SBCL/dependency environment.
+        // Release verification runs the emitted suite and reconciles receipts.
         const workflow = readFileSync(
           path.join(repoRoot, '.github/workflows/lisp.yml'),
           'utf8'
@@ -208,8 +208,12 @@ describe('AxIR CI scope', () => {
         }
         expect(workflow).toContain('go run ./cmd/lisp-core --check');
         expect(workflow).toContain(
-          'sbcl --script packages/lisp/tests/run.lisp'
+          'npm run axir:verify:release -- --targets lisp --workdir /tmp/axir-lisp-verify ir/axcore/root.axir'
         );
+        expect(workflow).toContain(
+          'sbcl --script packages/lisp/tests/runtime-adapter-integration.lisp'
+        );
+        expect(workflow).toContain('npm run website:check:lisp-snippets');
         expect(workflow).toContain(
           'sbcl --script packages/lisp/tests/jiti-integration.lisp'
         );
