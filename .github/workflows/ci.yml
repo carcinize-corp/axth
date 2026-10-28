@@ -24,7 +24,7 @@ env:
 jobs:
   changes:
     name: Detect CI Scope
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     outputs:
       axir: ${{ steps.scope.outputs.run_axir }}
       axir_targets: ${{ steps.scope.outputs.axir_targets }}
@@ -47,7 +47,7 @@ jobs:
     name: Build (Node ${{ matrix.node }})
     needs: changes
     if: needs.changes.outputs.core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     strategy:
       fail-fast: false
       matrix:
@@ -69,7 +69,7 @@ jobs:
 
   repo-checks:
     name: Repo Checks
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     steps:
       - uses: actions/checkout@v7
         with:
@@ -121,7 +121,7 @@ jobs:
     name: Workspace Tests (Node ${{ matrix.node }})
     needs: changes
     if: needs.changes.outputs.core == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     steps:
       - uses: actions/checkout@v7
       - name: Setup Node.js
@@ -139,7 +139,7 @@ jobs:
     name: Generated Examples (${{ matrix.target }})
     needs: changes
     if: needs.changes.outputs.axir == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     # Usually 3-9 minutes. The cap stops a hung generated runner from holding
     # the job until GitHub's 6-hour default.
     timeout-minutes: 30
@@ -239,7 +239,7 @@ jobs:
     name: AxIR Package Freshness
     needs: changes
     if: needs.changes.outputs.axir == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     steps:
       - uses: actions/checkout@v7
       - name: Setup Node.js
@@ -274,7 +274,7 @@ jobs:
     name: AxIR Go Tests (fast)
     # Every change: these static checks also read the docs, the examples and
     # the backlog, which a documentation-only change can break.
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -299,7 +299,7 @@ jobs:
 
   website:
     name: Documentation Website
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     steps:
       - uses: actions/checkout@v7
       - name: Setup Node.js
@@ -334,7 +334,7 @@ jobs:
     name: AxIR Verify (${{ matrix.target }})
     needs: changes
     if: needs.changes.outputs.axir == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     # Usually 1-6 minutes. The cap stops a hung conformance runner from
     # holding the job until GitHub's 6-hour default.
     timeout-minutes: 30
@@ -430,7 +430,7 @@ jobs:
     name: AxIR Agent Real-Engine Antidote
     needs: changes
     if: needs.changes.outputs.axir == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     steps:
       - uses: actions/checkout@v7
       - name: Setup Go
@@ -515,7 +515,7 @@ jobs:
 
   ci-summary:
     name: CI Summary
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     if: always()
     needs:
       - changes

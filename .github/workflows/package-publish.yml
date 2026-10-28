@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   rust-crates-io:
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     permissions:
       contents: read
       id-token: write
@@ -41,7 +41,7 @@ jobs:
           cargo publish $FLAGS --no-verify --manifest-path packages/rust/Cargo.toml
 
   python-pypi:
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     permissions:
       contents: read
       id-token: write
@@ -65,7 +65,7 @@ jobs:
           skip-existing: true
 
   java-maven-central:
-    runs-on: ubuntu-latest
+    runs-on: [fleet-pr-site-bbc, fleet-pr-4cpu]
     permissions:
       contents: read
     env:
